@@ -1,0 +1,11 @@
+digraph board {
+	rankdir=TB
+	n00000001 [label="USB 2.0 Camera: USB 2.0 Camera\n/dev/video0", shape=box, style=filled, fillcolor=yellow]
+	n00000004 [label="USB 2.0 Camera: USB 2.0 Camera\n/dev/video1", shape=box, style=filled, fillcolor=yellow]
+	n00000008 [label="{{<port0> 0} | Processing 2\n | {<port1> 1}}", shape=Mrecord, style=filled, fillcolor=green]
+	n00000008:port1 -> n00000001 [style=bold]
+	n00000008:port1 -> n0000000b:port0 [style=bold]
+	n0000000b [label="{{<port0> 0} | Extension 6\n | {<port1> 1}}", shape=Mrecord, style=filled, fillcolor=green]
+	n0000000e [label="{{} | Camera 1\n | {<port0> 0}}", shape=Mrecord, style=filled, fillcolor=green]
+	n0000000e:port0 -> n00000008:port0 [style=bold]
+}
