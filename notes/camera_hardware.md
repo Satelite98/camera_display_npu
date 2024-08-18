@@ -74,7 +74,9 @@ SCCB 协议是一种类IIC 协议的规定，由此先复习下IIC协议：
 
 ​			DVP 协议没有找到明确的协议说明,从CSDN的获取到的信息如下:
 
-​			物理层面上: 由帧同步信号(VSYNC),行同步信号(HSYNC),CLK 信号线,数据线(DATA 9-0)构成.
+​			物理层面上: 由帧同步信号(VSYNC),行同步信号(HSYNC),CLK 信号线,数据线(DATA 9-0)构成.在HREF 有效时,一个PCLK 传递一个data[9-0]数据线上的bit.
+
+​			总通信流程为:Vsync 的信号线拉起,HSYNC信号线拉起,HREF 信号线拉起,PCLK 带动数据传输.,一行传输完成后,HREF拉低,HSYNC拉低,等待下次HYSNC/EF  信号拉高后进行传输.
 
 ![image-20240815235358931](.\camera_hardware.assets\image-20240815235358931.png)
 
