@@ -12,7 +12,7 @@
 
 1.8V 情况下的pin脚连接如图所示，其中`PWDN`表示的是`power down`引脚，和IP 的断掉时序有关。这类的`power down`更多的是指低功耗状态，通讯传输结束之后就可以进入power down的状态，如果是需要进入电源关闭状态，可能是power off。
 
-![image-20240811110237830](.\camera_hardware.assets\image-20240811110237830.png)
+<img src=".\camera_hardware.assets\image-20240811110237830.png" width=70%>
 
 * 不同图像传输时用的不同数据线：The video port of OV5640 has 10-bit, D[9:0]. For 10-bit RGB raw output, please use D[9:0]. For 8-bit YCbCr or 8-bit RGB raw or 8-bit RGB 565 output, please use D[9:2].
 * 能够利用I2C 的协议进行通讯，并且读写寄存器的地址不同：`The SCCB bus of OV5640 camera module could be shared with other I2C device. When OV5640 is working, the read/write operation is separated by device address. The device address of OV5640 is 0x78 for write and 0x79 for read. I2C read/write to address other than the 2 address above will not affect SCCB registers of OV5640.`SCCB：serial camera control bus
@@ -32,7 +32,7 @@ SCCB 协议是一种类IIC 协议的规定，由此先复习下IIC协议：
 
 * 数据层面上：SDA 0->1 表示起始信号，SDA 1->0 是结束信号。其中每次是数据传输为多个SCL CLK周期，**数据段为８bit有效数据 + 1bit 从机应答**
 
-  ![image-20240813230448886](.\camera_hardware.assets\image-20240813230448886.png)
+  <img src=".\camera_hardware.assets\image-20240813230448886.png" width=70%>
 
 * 协议层面上-主从机的读写：
 
@@ -40,12 +40,11 @@ SCCB 协议是一种类IIC 协议的规定，由此先复习下IIC协议：
 
   * 主机写数据到从机：
 
-  ![image-20240814000722862](.\camera_hardware.assets\image-20240814000722862.png)
+  <img src=".\camera_hardware.assets\image-20240814000722862.png">
 
   * 主机到从机读取数据：
 
-  ![image-20240814000751264](.\camera_hardware.assets\image-20240814000751264.png)
-  
+  <img src=".\camera_hardware.assets\image-20240814000751264.png">
 ---
 
 ##### SCCB协议
@@ -58,15 +57,15 @@ SCCB 协议是一种类IIC 协议的规定，由此先复习下IIC协议：
 
   * SCCB  写: ==起始信号+从机地址(包含读写控制bit)+寄存器地址+data+结束信号==
 
-  ![img](.\camera_hardware.assets\1536533-20190812094735968-982810165.png)
+  <img src=".\camera_hardware.assets\1536533-20190812094735968-982810165.png" width=70%>
 
   * SCCB  读: ==起始信号+从机地址(包含读写控制bit)+寄存器地址+data1+结束信号==
 
-  ![img](.\camera_hardware.assets\1536533-20190812094801240-2109883530.png)
+  <img src=".\camera_hardware.assets\1536533-20190812094801240-2109883530.png" width = 70%>
 
   * 和IIC 读的区别
 
-    ![1](.\camera_hardware.assets\f1218001876f86aefcfa218ab120040a.png)
+    <img src=".\camera_hardware.assets\f1218001876f86aefcfa218ab120040a.png"  width=80%>
 
 ---
 
@@ -78,9 +77,9 @@ SCCB 协议是一种类IIC 协议的规定，由此先复习下IIC协议：
 
 ​			总通信流程为:Vsync 的信号线拉起,HSYNC信号线拉起,HREF 信号线拉起,PCLK 带动数据传输.,一行传输完成后,HREF拉低,HSYNC拉低,等待下次HYSNC/EF  信号拉高后进行传输.
 
-![image-20240815235358931](.\camera_hardware.assets\image-20240815235358931.png)
+<img src=".\camera_hardware.assets\image-20240815235358931.png">
 
-![image-20240815235435620](.\camera_hardware.assets\image-20240815235435620.png)
+<img src=".\camera_hardware.assets\image-20240815235435620.png">
 
 ### 2.2 OV5640 的硬件功能
 
