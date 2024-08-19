@@ -96,3 +96,45 @@ SCCB 协议是一种类IIC 协议的规定，由此先复习下IIC协议：
 *  strobe flash and frame exposure  频闪 和帧曝光
 *  frame exposure (FREX) mode -支持整帧曝光模式
 * image sensor processor digital functions-内有ISP处理器。
+
+#### 2.2.1 上电初始化流程
+
+* 上电1ms之后可以读写寄存器，RESETB 制高20MS以后可以利用IIC 控制寄存器
+
+#### 2.2.2  摄像控制流程
+
+
+
+
+
+
+
+##### 支持的功能
+
+*  mirror and flip（镜像和翻转）
+*  image windowing：控制图像采样窗口 REG 0x3800-0x3813
+* test pattern: 提供测试图片输出 REG 0x503D
+* AEC/AGC algorithms : 自动曝光和补偿算法 0x3500-0x350D 0x3A0F-0x3A1F
+* black level calibration：黑色校准  0x4000-0x4009
+* light frequency selection：闪光频率选择 0x3C01-0x3C0C
+* strobe flash and frame exposure：单个曝光和整帧曝光
+  * strober flash：
+    * 通过SCCB 控制strobe 请求信号 和 模式
+    * 只有在strobe 信号线为高的时候，曝光才有效，数据才有效。
+    * xenon 单次曝光、LED1& LED2 脉冲有效曝光、LED3 长有效脉冲曝光。
+  * frame exposure 帧曝光模式：在帧曝光模式下，整个帧的图片在一个时间曝光，之后快门关闭，然后数据被读出，数据全部读出之后，再开始下一次的打开快门曝光。OV5640支持两种帧曝光方式
+    * FREX pin 脚控制
+    * SCCB控制： REG  0x3B00-0x3B0C
+* 有ISP 处理器，支持多种ISP 图像算法。【这部分内容应该是重点也是难点，但是此次重点不在此】
+
+#### 2.2.3  数据读取流程
+
+#####  图像输出6种timming
+
+
+
+#### 2.2.4  状态机控制
+
+* reset : RESETB PIN  接低或者 REG 0x3008[7]  set high
+* hardware standby: PWDN pin tied high
+* software standby: 
