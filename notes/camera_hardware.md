@@ -1,4 +1,4 @@
-# camera 的硬件描述
+# camera - OV5640 的硬件描述
 
 [toc]
 
@@ -104,10 +104,6 @@ SCCB 协议是一种类IIC 协议的规定，由此先复习下IIC协议：
 
 
 
-
-
-
-
 ##### 支持的功能
 
 *  mirror and flip（镜像和翻转）
@@ -128,7 +124,20 @@ SCCB 协议是一种类IIC 协议的规定，由此先复习下IIC协议：
 
 #### 2.2.3  数据读取流程
 
-#####  图像输出6种timming
+#####          1. 图像输出6种timing,见手册P77
+
+* 1timing：只有时钟输出，无数据
+* 2timing：PCLK free running，有VSYNC和DATA 信号,数据按照设定好的line width 去传输。数据的最后一行可能会有值为0xFF 的填充值
+* 3timing：PCLK free running，有VSYNC和DATA 信号,数据按照设定好的line width 去传输。数据的最后一行没有值为0xFF 的填充值，且最后一行的line width 不同
+* 4timing：图像的长宽在一个数据流中，**每一行前两个字节为有效长度**，根据设定好的width 和 height去传输数据，如果实际图片的line 的有效值 < width，那么传输中会填充0xFF
+* 5timing：图像的长宽在一个数据流中，**每一行最后两个字节为有效长度**，根据设定好的width 和 height去传输数据，如果实际图片的line 的有效值 < width，那么传输中会填充0xFF
+* 6timing：图像的长宽在一个数据流中，**数据流中不显示有效长度**，根据设定好的width 和 height去传输数据，如果实际图片的line 的有效值 < width，那么传输中会填充0xFF
+
+#####              2. 需要关注的寄存器
+
+* 6.4 frame control： 是否bypass 控制
+* 6.5 format description：控制输出的数据流格式，控制UV采样的规则（从哪个像素点采样）
+* 6.6  digital video port： 输出协议格式控制-DVP
 
 
 
