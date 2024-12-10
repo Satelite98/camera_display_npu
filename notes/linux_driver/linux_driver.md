@@ -73,7 +73,7 @@ linux 中驱动的调用接口都如下图所示：任何的驱动文件成功�
 
 ### 1.2 设备号
 
-  设备号的类型定义见下文，本质上是一个无符号32位数据。并且对于32位机器来说，这低20位表示次设备号，高12位表示主设备号。
+ 	设备号的类型定义见下文，本质上是一个无符号32位数据。并且对于32位机器来说，这低20位表示次设备号，高12位表示主设备号。
 
 ```c
 /*设备号定义*/
@@ -761,15 +761,311 @@ static const struct machine_desc __mach_desc_IMX6UL __used							\
 
 具体驱动文件可见 代码文件夹中的deviceTreeLed1.c，主要可以分为三个部分。
 
-* **cdev的驱动框架：**在Linux驱动中，对于LED的控制还是采用cdev实现的，由此这里采用的还是cdev的矿建，包括初始化设备号、初始化cdev、初始化设备、创建设备类、创建设备。
-
 * **从设备树中获取硬件信息**
 
   利用设备树的接口从设备树中获取硬件信息，比如能够调用接口获取到设备节点和名字，再调用数组读取接口获取到REG的值和范围，进行IO remap 之后，这样就有了寄存器的空间。
 
+  ```c
+      /* find by node name */
+      dtsled_point.nd = of_find_node_by_path("/alphaled");
+      /* get  compatible from node   */
+      proper  = of_find_property(dtsled_point.nd, "compatible", NULL);
+      /* get status from node */
+      ret  = of_property_read_string(dtsled_point.nd, "status", &str);
+      /* read data type */
+      ret = of_property_read_u32_array(dtsled_point.nd, "reg", regdata, 10);
+  
+  ```
+
 * **硬件的初始化工作**
 
   在获取到硬件信息之后，本质上还是要让硬件工作起来，于是我们还要了解硬件的控制流，比如设置时钟、开启IO复用、设置IO输出模式、设置IO输出电平等操作。
+
+  ```c
+      IMX6U_CCM_CCGR1 = ioremap(regdata[0], regdata[1]); 
+      SW_MUX_GPIO1_IO03 = ioremap(regdata[2], regdata[3]); 
+      SW_PAD_GPIO1_IO03 = ioremap(regdata[4], regdata[5]); 
+      GPIO1_DR = ioremap(regdata[6], regdata[7]); 
+      GPIO1_GDIR = ioremap(regdata[8], regdata[9]); 
+      /* open clk */
+      val = readl(IMX6U_CCM_CCGR1); 
+      val &= ~(3 << 26);  
+      val |= (3 << 26);   
+      writel(val, IMX6U_CCM_CCGR1); 
+  
+      /* set IO function / IO swap */
+      writel(5, SW_MUX_GPIO1_IO03); 
+      writel(0x10B0, SW_PAD_GPIO1_IO03); 
+      val = readl(GPIO1_GDIR); 
+      val &= ~(1 << 3);  
+      val |= (1 << 3);    //
+      writel(val, GPIO1_GDIR); 
+      
+      /* set GPIO down*/
+      val = readl(GPIO1_DR); 
+      val |= (1 << 3);     
+      writel(val, GPIO1_DR); 
+     
+  ```
+
+* **cdev的驱动框架：**在Linux驱动中，对于LED的控制还是采用cdev实现的，由此这里采用的还是cdev的矿建，包括初始化设备号、初始化cdev、初始化设备、创建设备类、创建设备。
+
+  ```c
+     /* cdev setting  */
+     /* 1. get major */
+    if (dtsled_point.major) {        /*  定义了设备号 */ 
+      dtsled_point.devid = MKDEV(dtsled_point.major, 0); 
+      register_chrdev_region(dtsled_point.devid, DTSLED_CNT,  DTSLED_NAME); 
+    }else {/* 没有定义设备号 */ 
+       alloc_chrdev_region(&dtsled_point.devid,0,DTSLED_CNT, DTSLED_NAME );
+       dtsled_point.major = MAJOR(dtsled_point.devid);
+       dtsled_point.minor = MINOR(dtsled_point.devid);
+    }
+    printk("dtsled major=%d,minor=%d\r\n",dtsled_point.major, dtsled_point.minor);   
+    
+    /* 2. initial cdev */
+    dtsled_point.cdev.owner = THIS_MODULE;
+    cdev_init(&dtsled_point.cdev, &dts_led_fops);
+  
+    /* 3.add a cdev  */
+      cdev_add(&dtsled_point.cdev, dtsled_point.devid,DTSLED_CNT);
+    /* 4.creat class */
+      dtsled_point.class =  class_create(THIS_MODULE, DTSLED_NAME); 
+      if (IS_ERR(dtsled_point.class)) { 
+           return PTR_ERR(dtsled_point.class); 
+      } 
+  
+    /* 5.create device*/
+     dtsled_point.device = device_create( dtsled_point.class, NULL, dtsled_point.devid, NULL,DTSLED_NAME);
+     if (IS_ERR(dtsled_point.device)) { 
+       return PTR_ERR(dtsled_point.device); 
+     }
+  ```
+
+### 六、pinctrl和gpio 子系统
+
+### 6.1 Pinctrl 子系统
+
+​		第五章是利用设备树来获取信息了，但是本质上还是利用单片机的思路来初始化寄存器。此外，linux提供了GPIO/Pinctrl子系统来方便我们初始化GPIO外设。上一章初始化外设中，我们主要对GPIO硬件进行了一下的操作：
+
+1. 获取引脚信息
+
+2. 设置PIN脚的复用信息
+
+3. 设置PIN脚的电气特性、引脚上下拉、速度、驱动能力等。**需要看下具体的特性的**。
+
+#### 6.1.1 利用pinctrl 初始化GPIO的规则及含义
+
+采用pinctrl的方式的话，我们只需要在根据实际的情况配置PIN的初始化、复用寄存器。并且按照设备树的规则进行填写即可。
+
+```c
+/* imux6ul.dts */
+iomuxc: iomuxc@020e0000 {
+    compatible = "fsl,imx6ul-iomuxc";
+    reg = <0x020e0000 0x4000>;
+};
+/*imx6ull-alientek-emmc.dts*/
+&iomuxc {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_hog_1>;
+	imx6ul-evk {
+		pinctrl_hog_1: hoggrp-1 {
+			fsl,pins = <
+				MX6UL_PAD_UART1_RTS_B__GPIO1_IO19	    0x17059 /* SD1 CD */
+				MX6UL_PAD_GPIO1_IO05__USDHC1_VSELECT	0x17059 /* SD1 VSELECT */
+				MX6UL_PAD_GPIO1_IO00__ANATOP_OTG1_ID    0x13058 /* USB_OTG1_ID */
+			>;
+	       };
+    ...
+        ...
+        ...
+}
+```
+
+​		对于这些宏定义，在`arch/arm/boot/dts/imx6ul-pinfunc.h`中有宏定义,这五个值和驱动程序以及具体的硬件设置有关，在pinctrl的规则下，再加上要0x17259的值就会有六个值。 这六个值的含义分别见下：
+
+**<mux_reg  config_reg input_reg mux_mode input_val config_reg_val >**
+
+```c
+#define MX6UL_PAD_UART1_RTS_B__GPIO1_IO19                         0x0090 0x031C 0x0000 0x5 0x0
+
+pinctrl_hog_1: hoggrp-1 {
+    fsl,pins = <
+        0x0090 0x031C 0x0000 0x5 0x0	0x17059 /* SD1 CD */
+        MX6UL_PAD_GPIO1_IO05__USDHC1_VSELECT	0x17059 /* SD1 VSELECT */
+        MX6UL_PAD_GPIO1_IO00__ANATOP_OTG1_ID    0x13058 /* USB_OTG1_ID */
+        >;
+};
+
+<mux_reg  config_reg input_reg mux_mode input_val config_reg_val >
+```
+
+​			所以实际上，利用pinctrl设备树我们可以对pin脚的复**用寄存器、初始化寄存器、输入寄存器**完成了初始化。其中iomux的base为`0x020e0000`，复用、初始化、输入寄存器的三个偏移分别为：90H、31CH、00H。有些外设有input_reg的值，有些外设没有input_reg的值，当作为GPIO_IO19的时候，这个外设是没有input_reg的，所以为0x00H。==这里需要补一个有input_reg的情况。==
+
+#### 6.1.2 PinCtrl 的实现简单介绍
+
+​	上面我们在添加的pinctrl 节点的文字描述如何在Linux 内核中处理的呢？在linux内核中，Pinctrl子节点采用的是platfrom框架描述编写的驱动，当device和driver中id匹配时，就会有probe函数执行。当我们全局搜索`imx6ul-iomuxc`字符时，就能找到imx6ul的Pinctrl的驱动工程，其驱动函数是`imx6ul_pinctrl_probe`。最后会调用`imx_pinctrl_parse_groups`完成一些寄存器的初始化。
+
+```c
+imx6ul_pinctrl_probe
+    ->imx_pinctrl_probe
+    	->imx_pinctrl_probe_dt
+    		->imx_pinctrl_parse_functions
+    			->imx_pinctrl_parse_groups
+    	->pinctrl_register
+```
+
+在`imx_pinctrl_probe`函数中，会有关于`imx_pinctrl_desc`结构体的初始化工作，并且赋值一些初始化函数，在`imx_pinctrl_parse_groups`函数中，会真正的去初始化pin的一些寄存器。然后再调用`pinctrl_register`函数，该函数想Linux内核注册一个PIN控制器，可以调用已经指向的`imx_pinctrl_desc`中的`imx_pctrl_ops/imx_pmx_ops/imx_pinconf_ops`这三个结构体，里面都是一些函数初始化指针。
+
+```c
+	/*imx_pinctrl_probe*/
+	imx_pinctrl_desc->name = dev_name(&pdev->dev);
+	imx_pinctrl_desc->pins = info->pins;
+	imx_pinctrl_desc->npins = info->npins;
+	imx_pinctrl_desc->pctlops = &imx_pctrl_ops;
+	imx_pinctrl_desc->pmxops = &imx_pmx_ops;
+	imx_pinctrl_desc->confops = &imx_pinconf_ops;
+	imx_pinctrl_desc->owner = THIS_MODULE;
+
+	/*　imx_pinctrl_parse_groups　*/
+	grp->npins = size / pin_size;
+	grp->pins = devm_kzalloc(info->dev, grp->npins * sizeof(struct imx_pin),
+				GFP_KERNEL);
+	grp->pin_ids = devm_kzalloc(info->dev, grp->npins * sizeof(unsigned int),
+				GFP_KERNEL);
+	if (!grp->pins || ! grp->pin_ids)
+		return -ENOMEM;
+
+	for (i = 0; i < grp->npins; i++) {
+		u32 mux_reg = be32_to_cpu(*list++);
+		u32 conf_reg;
+		unsigned int pin_id;
+		struct imx_pin_reg *pin_reg;
+		struct imx_pin *pin = &grp->pins[i];
+．．．
+		pin_id = (mux_reg != -1) ? mux_reg / 4 : conf_reg / 4;
+		pin_reg = &info->pin_regs[pin_id];
+		pin->pin = pin_id;
+		grp->pin_ids[i] = pin_id;
+		pin_reg->mux_reg = mux_reg;
+		pin_reg->conf_reg = conf_reg;
+		pin->input_reg = be32_to_cpu(*list++);
+		pin->mux_mode = be32_to_cpu(*list++);
+		pin->input_val = be32_to_cpu(*list++);
+	}
+```
+
+#### 6.1.3在设备树中添加pinctrL节点
+
+​	官方文档路径：`Documentation/devicetree/bindings/pinctrl/fsl,imx-pinctrl.txt`。
+
+​	在imux6ull中，pinctrl的驱动会调用`  list = of_get_property(np, "fsl,pins", &size);`语句，由此需要在添加节点时，配置属性一定要是`fsl,pins`。由此 我们可以根据硬件电路图来添加Pinctrl 节点。在`iomuxc`的的`imx6ul-evk`子节点下添加`pinctrl_test`节点。添加完成以后如下所示： 
+
+```c
+pinctrl_test:testgrp{
+	fsl,pin = <
+    	MX6UL_PAD_GPIO1_IO00__GPIO1_IO00 0x1b008
+    >
+}
+```
+
+### 6.2 GPIO 子系统
+
+​	pinctrl 子系统用于设置PIN脚的属性和复用关系，在真正使用的过程中,可以实现GPIO子系统的功能控制，主要有三个：
+
+* 作为输入功能时，支持读引脚值;
+* 作为输出功能时，支持输出高低电平；
+* 部分 gpio 还负责接收中断；
+
+#### 6.2.1 在设备树中添加GPIO信息
+
+```c
+/* 在GPIO 使用侧需要注明使用引脚和有效电平 */
+&usdhc1 {
+...
+	cd-gpios = <&gpio1 19 GPIO_ACTIVE_LOW>;
+...
+};
+
+/*GPIO 控制器的初始化：*/
+gpio1: gpio@0209c000 {
+    compatible = "fsl,imx6ul-gpio", "fsl,imx35-gpio";
+    reg = <0x0209c000 0x4000>;					/* GPIO　数据寄存器起始地址 */ 
+    interrupts = <GIC_SPI 66 IRQ_TYPE_LEVEL_HIGH>,
+    <GIC_SPI 67 IRQ_TYPE_LEVEL_HIGH>;
+    gpio-controller;　　　　/* 表示是一个GPIO控制器*/ 
+    #gpio-cells = <2>;　　　/* 表示GPIO信息由两部分表述，如上　&gpio1 19表示GPIO1—19　GPIO_ACTIVE_LOW　表示低电平有效*/ 
+    interrupt-controller;
+    #interrupt-cells = <2>;
+};
+```
+
+#### 6.2.2 GPIO子系统的引用函数
+
+​	Pinctrl 会默认把对应的IO进行初始化完毕，由于系统会自动根据配置的选项把PIN脚初始化好，GPIO子系统是控制/读取PIN脚的电平，所以会有一些默认的接口函数供我们使用。
+
+* **gpio_request 函数：**用于对使用的GPIO进行申请，第一个传参是GPIO的引脚标号（比如芯片的35号引脚，PIN35）。这个标号可以通过` of_get_named_gpio`这个设备树函数从设备树中直接获取。
+* **gpio_free 函数 ：**根据这个PIN脚标号，释放这个GPIO的控制权
+* **gpio_direction_input 函数 ：**设置PIN脚为输入
+* **gpio_direction_output 函数：**设置PIN脚为输出
+* **gpio_get_value 函数 ：**读取Pin脚值
+* **gpio_set_value 函数 ：**设置Pine脚值。
+
+#### 6.2.3 GPIO 子系统 设备树相关函数
+
+​	上面的函数是GPIO的使用函数，有个关键参数就是GPIO的PIN脚号，这种类似的硬件信息，我们能通过dts的方式去获取：
+
+* **of_gpio_named_count 函数 ：**用于统计设备树中某个设备树节点中的GPIO属性定义了几个GPIO信息，并且会把空的GPIO信息也统计进去，见下图：
+
+  ```c
+    gpios = <0   
+             &gpio1 1 2 
+              0 
+             &gpio2 3 4>; 
+  ```
+
+* **of_gpio_count 函数 ：**和 of_gpio_named_count 函数一样，但是不同的地方在于，此函数统计的是“gpios”这个属性的 GPIO 数量，相当于上个函数的参数固定为“gpios”
+
+* **of_get_named_gpio 函数 ：**这个函数比较**关键**了，他是取在`np`设备树节点下的名字为`propname`的第`index`个GPIO dts 使用语句的PIN脚号，有了这个号码之后，就可以利用`6.2.2`的函数去控制GPIO啦。
+
+  ```c
+  int of_get_named_gpio(struct device_node     *np, 
+                         const char        *propname,     
+  						int            index) 
+  ```
+
+  
+
+#### 6.3实际PinCtrl & GPIO LED 用例
+
+​	本实验的主要目的是使用Linux的Pinctrl和GPIO子系统接口，用于控制LED。我们会分为三部分去实现这个功能。
+
+##### 1. 增加dts描述
+
+​	需要根据硬件电路图增加需要控制的引脚的dts描述，比如对于LED1而言，是GPIO1_IO03的引脚，我们就需要增加对于的PInctrl节点和GPIO控制节点，如下代码所示：
+
+```c
+/* imx6ull-alientek-emmc.dts:  &iomuxc  -> imx6ul-evk 下面添加控制节点 */
+pinctrl_gpio_leds: gpio-leds {
+    fsl,pins = <
+        MX6UL_PAD_GPIO1_IO03__GPIO1_IO03	0x17059
+        >;
+};
+/* 在根节点下添加LED－GPIO的描述节点*/
+gpioled { 
+    #address-cells = <1>; 
+    #size-cells = <1>; 
+    compatible = "atkalpha-gpioled"; 
+    pinctrl-names = "default"; 
+    pinctrl-0 = <&pinctrl_gpio_leds>; 
+    led-gpio = <&gpio1 3 GPIO_ACTIVE_LOW>; 
+    status = "okay"; 
+}; 
+```
+
+​		以上，我们就能够初始化好GPIO1_IO03，并且根据设备树文件获取到LED-GPIO的pin 脚号码，然后去控制对应的GPIO啦。
+
+​       **注意：**要防止出现引脚多处复用的情况，所以在这个设备树中，我们还需要搜索`GPIO1_IO03`和`&gpio1 3`这两组关键字去防止同一个GPIO被多次初始化／多次复用的情况。
 
 
 
