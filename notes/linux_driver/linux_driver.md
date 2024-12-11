@@ -1067,6 +1067,62 @@ gpioled {
 
 ​       **注意：**要防止出现引脚多处复用的情况，所以在这个设备树中，我们还需要搜索`GPIO1_IO03`和`&gpio1 3`这两组关键字去防止同一个GPIO被多次初始化／多次复用的情况。
 
+##### 2. 从dts中读取有效的信息
+
+​	在驱动程序中是对GPIO子系统的操作，可以分为**根据名字找到子节点、根据子节点属性找到对应的GPIO、控制对应的GPIO三个步骤**。可见代码如下：
+
+```C
+/* 1. 找到子节点 */
+ gpioled.nd = of_find_node_by_path("/gpioled");
+/* 2.找到节点用的GPIOPIN脚 */
+ gpioled.led_gpio = of_get_named_gpio(gpioled.nd, "led-gpio", 0); 
+/* 3.控制该GPIO */
+ret = gpio_direction_output(gpioled.led_gpio, 1);
+```
+
+#### 3.加入字符驱动框架，实现IO控制
+
+​	由于本驱动是GPIO的驱动，可以将GPIO定义一个设备结构体，并且把**该结构体指针作为file 结构体的private_data，这样对不同文件操作的时候，就能找到对应的设备结构体**。
+
+```c
+/* 1.定义一个设备结构体 ，并且定义一个设备结构体*/
+33  struct gpioled_dev{ 
+34      dev_t devid;                /* 设备号       */ 
+35      struct cdev cdev;           /* cdev       */ 
+36      struct class *class;       /* 类         */ 
+37      struct device *device;     /* 设备       */ 
+38      int major;                  /* 主设备号     */ 
+39      int minor;                  /* 次设备号     */ 
+40      struct device_node  *nd;   /* 设备节点    */ 
+41      int led_gpio;               /* led 所使用的 GPIO 编号        */ 
+42  }; 
+  	struct gpioled_dev gpioled; /* led 设备 */ 
+
+/* 1.1 在init 函数中初始化这个设备结构体 指针。*/
+127 static int __init led_init(void) 
+128 { 
+     	gpioled.nd = of_find_node_by_path("/gpioled"); 
+    	......
+	}
+/* 2.在open的时候，为设备结构体赋值 */
+53  static int led_open(struct inode *inode, struct file *filp) 
+54  { 
+55      filp->private_data = &gpioled; /* 设置私有数据 */ 
+56      return 0; 
+57  } 
+
+/* 3. 在操作的时候，利用改设备结构体去找到设备，并且操作。 */
+80  static ssize_t led_write(struct file *filp, const char __user *buf,  
+size_t cnt, loff_t *offt) 
+81  {
+    	struct gpioled_dev *dev = filp->private_data; 
+     
+100     return 0; 
+101 } 
+```
+
+
+
 
 
 
