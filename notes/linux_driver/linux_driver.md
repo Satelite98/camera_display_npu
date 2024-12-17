@@ -1364,21 +1364,164 @@ gpioled.dev_stats = 0;
 
 
 
-
-
 ### 八. 按键输入实验
 
+​	输入案件采用的是GPIO18，也是采用Pinctrl 和 GPIO子系统来进行输入读取，具体配置可以参考第六章的实现。
+
+### 九、Linux定时器实验
+
+#### 9.1 内核时基简介
+
+* **设定linux 时基频率：**内核时基就是内核代码运行时的systick，底层实现可能是CORE的中断。在`make menuconfig`中的`-> Kernel Features->Timer frequency (<choice> [=y])   `中能够配置，可见下图图像。
+
+```c
+ ┌─────────────────────── Timer frequency ───────────────────────┐
+│  Use the arrow keys to navigate this window or press the      │
+│  hotkey of the item you wish to select followed by the <SPACE │
+│  BAR>. Press <?> for additional information about this        │
+│ ┌───────────────────────────────────────────────────────────┐ │
+│ │                        (X) 100 Hz                         │ │
+│ │                        ( ) 200 Hz                         │ │
+│ │                        ( ) 250 Hz                         │ │
+│ │                        ( ) 300 Hz                         │ │
+│ │                        ( ) 500 Hz                         │ │
+│ │                        ( ) 1000 Hz                        │ │
+│ └───────────────────────────────────────────────────────────┘ │
+├───────────────────────────────────────────────────────────────┤
+│                    <Select>      < Help > 
+```
+
+* **系统时钟的节拍记录**
+
+  ​		在linux内核中，系统会用一个全局变量来记录当前时基的周期数。在32位系统中是32位，在64位系统中就是64位。这样就会有一个溢出的问题，为了减少溢出问题，在实际的比较过程中，我们一般建议用系统提供的接口来设置time事件。
+
+  ```c
+  /* linux 用来记录时基的变量 */
+  76 extern u64 __jiffy_data jiffies_64; 
+  77 extern unsigned long volatile __jiffy_data jiffies;  
+  
+  /* linux 中使用的比较函数 */ 
+  time_after(unkown, known)  /* 一般unkown是jiffies，known是设定的timer值 */
+  time_before(unkown, known) 
+  time_after_eq(unkown, known) 
+  time_before_eq(unkown, known) 
+      
+  /* 简单的调用demo */
+   unsigned long timeout;     
+   timeout = jiffies + (2 * HZ);    /* 超时的时间点 */    
+   if(time_before(jiffies, timeout)) {
+   /* 超时未发生 */
+   }else{
+   /* 超时发生 */
+   }  
+  ```
+
+* **系统时钟的转化接口**
+
+  针对`jiffies`linux系统还提供了一套API函数来直接转化为秒等单位：
+
+  ```c
+  /* 将 jiffies 类型的参数 j 分别转换为对应的毫秒、微秒、纳秒。 */
+  int jiffies_to_msecs(const unsigned long j) 
+  int jiffies_to_usecs(const unsigned long j) 
+  u64 jiffies_to_nsecs(const unsigned long j) 
+      
+  /* 将毫秒、微秒、纳秒转换为 jiffies 类型。 */
+  long msecs_to_jiffies(const unsigned int m) 
+  long usecs_to_jiffies(const unsigned int u) 
+  unsigned long nsecs_to_jiffies(u64 n) 
+  ```
+
+  此时timout 的定义就可以表示为：
+
+  ```c
+  timeout = jiffies + nsecs_to_jiffies(2);  
+  ```
+
+* 内核delay接口
+
+  上面的函数只是用于判断事件，如果有delay的需求就可以用下面的接口
+
+  ```c
+  /* 纳秒、微秒和毫秒延时函数 */
+  void ndelay(unsigned long nsecs) 
+  void udelay(unsigned long usecs) 
+  void mdelay(unsigned long mseces) 
+  ```
+
+#### 9.2 内核定时器简介
+
+​		上小结介绍了内核的时机和比较时间/delay的API函数。关于定时器，我们还会可能有定时周期性的任务。对此linux内核提供了软件的`timer_list`来给我们使用。值得注意的是，此定时器不会循环调用，如需循环调用，需要在每次的处理函数中更改定时时间。
+
+* timer_list结构体
+
+  ```c
+  struct timer_list { 
+      struct list_head entry; 
+      unsigned long expires;         /* 定时器超时时间，单位是节拍数  */ 
+      struct tvec_base *base;  
+   
+      void (*function)(unsigned long);   /* 定时处理函数          */ 
+      unsigned long data;             /* 要传递给 function 函数的参数  */ 
+   
+      int slack; 
+  }; 
+  ```
+
+* linux 提供的API函数
+
+  ```c
+  void init_timer(struct timer_list *timer) /* 初始化时钟结构体 */
+  void add_timer(struct timer_list *timer)  /* 向linux 内核注册时钟结构体 */ 
+  int del_timer(struct timer_list * timer)  /* 删除定时器 */    
+  int del_timer_sync(struct timer_list *timer) /* 删除定时器的同步版本 */    
+  int mod_timer(struct timer_list *timer, unsigned long expires) /* 设置定时时间并且激活 */    
+  ```
+
+#### 9.3 内核定时器函数demo
+
+​		简单的定时器demo思路为：
+
+1. 定义一个定时器实例。
+2. 写一个定时器处理函数，如需循环调用，添加`mod_timer`函数。
+3. 在init函数中 初始化timer、设定timer参数、向系统中添加这个timer。
+4. 在退出函数中删除此定时器。
+
+```c
+1  struct timer_list timer;  /* 定义定时器  */
+4  void function(unsigned long arg) 
+5  {     
+    ...
+        ....
+13    mod_timer(&dev->timertest, jiffies + msecs_to_jiffies(2000));  
+14 } 
+
+16 /* 初始化函数 */ 
+17 void init(void)   
+18 { 
+19    init_timer(&timer);               /* 初始化定时器      */ 
+20  
+21    timer.function = function;       /* 设置定时处理函数    */ 
+22    timer.expires=jffies + msecs_to_jiffies(2000);/* 超时时间 2 秒 */ 
+23    timer.data = (unsigned long)&dev;  /* 将设备结构体作为参数  */ 
+24   
+25   add_timer(&timer);             /* 启动定时器       */ 
+26 } 
+
+28 /* 退出函数 */ 
+29 void exit(void) 
+30 { 
+31    del_timer(&timer);  /* 删除定时器 */ 
+32    /* 或者使用 */ 
+33    del_timer_sync(&timer); 
+34 }
+```
 
 
 
 
 
-
-
-
-
-
-
+ 
 
 
 
