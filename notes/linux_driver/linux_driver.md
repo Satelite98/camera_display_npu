@@ -1418,7 +1418,7 @@ gpioled.dev_stats = 0;
 
 * **系统时钟的转化接口**
 
-  针对`jiffies`linux系统还提供了一套API函数来直接转化为秒等单位：
+  针对`jiffies`，linux系统还提供了一套API函数来直接转化为秒等单位：
 
   ```c
   /* 将 jiffies 类型的参数 j 分别转换为对应的毫秒、微秒、纳秒。 */
@@ -1435,7 +1435,7 @@ gpioled.dev_stats = 0;
   此时timout 的定义就可以表示为：
 
   ```c
-  timeout = jiffies + nsecs_to_jiffies(2);  
+  timeout = jiffies + msecs_to_jiffies(2000);  
   ```
 
 * 内核delay接口
@@ -1483,7 +1483,7 @@ gpioled.dev_stats = 0;
 ​		简单的定时器demo思路为：
 
 1. 定义一个定时器实例。
-2. 写一个定时器处理函数，如需循环调用，添加`mod_timer`函数。
+2. 写一个定时器处理函数，如需循环调用，添加`mod_timer`函数每次定时函数中再初始化一次。
 3. 在init函数中 初始化timer、设定timer参数、向系统中添加这个timer。
 4. 在退出函数中删除此定时器。
 
@@ -1519,11 +1519,226 @@ gpioled.dev_stats = 0;
 
 
 
+### 十、Linux中断实验
 
+#### 10.1 硬件中断描述
+
+* **中断向量表**
+
+  cortexA7的中断控制也是由中断向量表实现的，具体的中断向量入口可见下图。各个中断的含义如下，软件中断系统 需要关注的主要是复位中断和IRQ/FIQ中断.
+
+  * 复位中断：CPU 复位以后就会进入复位中断。
+  * 未定义指令中断(Undefined Instruction)，如果指令不能识别的话就会产生此中断。
+  * 软中断(Software Interrupt,SWI)，由 SWI 指令引起的中断，Linux 的系统调用会用 SWI指令来引起软中断，通过软中断来陷入到内核空间。这个是**CPU的软中断和GIC软中断**的概念不一致
+  * 指令预取中止中断(Prefetch Abort)，预取指令的出错的时候会产生此中断。 
+  * 数据访问中止中断(Data Abort)，访问数据出错的时候会产生此中断。
+  * IRQ 中断(IRQ Interrupt)，核外部中断。由GIC控制器触发。 
+  * FIQ 中断(FIQ Interrupt)，快速中断，如果需要快速处理中断的话就可以使用此中断。
+
+  ![image-20241222104113952](.\linux_driver.assets\image-20241222104113952.png)
+
+* **GIC控制器**
+
+  ​		GIC是arm的中断控制器IP，能够对外部中断控制、设置优先级、同步给不通的CORE(多核系统)。GIC和cortexA7之间的中断通路如下所示。可见GIC会把中断信号通过FIQ/IRQ/VFIQ/VIRQ 4个通路输入给arm内核。
+
+  ![image-20241222110253031](.\linux_driver.assets\image-20241222110253031.png)
+
+  ​		上图左侧是GIC的中断输入来源，总体可以分为三个部分：
+
+  * interrupt ID 0-15：SGI中断，由软件写GIC寄存器触发。是分别通知多个core的。
+
+  * interrupt ID 16-31：PPI中断（Private Peripheral Interrupt），私有外设中断，也是分别通知各个core的。
+
+  * interrupt ID 32-1019：SPI中断（Share Peripheral Interrupt），共享外设中断，多核共用，能够通知到所有的core，让所有的core处理。
+
+    对于GIC控制器，可以分为Distributor端和CPU interface端两个部分的工作。
+
+    **Distributor端：**
+
+      ①、全局中断使能控制。 
+      ②、控制每一个中断的使能或者关闭。 
+      ③、设置每个中断的优先级。 
+      ④、设置每个中断的目标处理器列表。 
+      ⑤、设置每个外部中断的触发模式：电平触发或边沿触发。 
+      ⑥、设置每个中断属于组 0 还是组 1。
+
+    **CPU interface端：**
+
+    ①、使能或者关闭发送到 CPU Core 的中断请求信号。
+
+    ②、应答中断。 
+    ③、通知中断处理完成。 
+    ④、设置优先级掩码，通过掩码来设置哪些中断不需要上报给 CPU Core。 
+    ⑤、定义抢占策略。 
+    ⑥、当多个中断到来的时候，选择优先级最高的中断通知给 CPU Core。  
+
+* **CP15协处理器。**
+
+  CP15协处理器寄存器是特殊的寄存器，有专门的指令能够进行读写，具体格式见下方:
+
+  ```c
+  /* write  register value to  CP15*/
+  MCR{cond} p15, <opc1>, <Rt>, <CRn>, <CRm>, <opc2> 
+  /* read  CP15 value to register */
+  MRC{cond} p15, <opc1>, <Rt>, <CRn>, <CRm>, <opc2>     
+  ```
+
+  其中各部分参数解释如下：
+
+  * cond:指令执行的条件码，如果忽略的话就表示无条件执行。 
+  * opc1：协处理器要执行的操作码。 
+  * Rt：ARM 源寄存器，要写入到 CP15 寄存器的数据就保存在此寄存器中。 
+  * CRn：CP15 协处理器的目标寄存器。 
+  * CRm：协处理器中附加的目标寄存器或者源操作数寄存器，如果不需要附加信息就将CRm 设置为 C0，否则结果不可预测。
+  *  opc2：可选的协处理器特定操作码，当不需要的时候要设置为 0。
+
+  由此，我们如果想要将CP15中的C0寄存器的值督导R0寄存器中，可以用以下的汇编函数：
+
+  ```c
+  MRC p15, 0,R0,C0,C0,0
+  ```
+
+  介绍CP15寄存器的原因是 C1寄存器作为SCTLR寄存器使用的时候，能够控制中断向量表。其中bit13 为中断向量表基地址选择，为0表示中断向量表地址是0x00000000，可以通过VBAR寄存器来重新映射。为1表示中断向量表地址是0xFFFF0000，不可以被重新映射。
+
+  VBAR 寄存器：C12在` CRn=c12，opc1=0，CRm=c0，opc2=0 `表示VBAR寄存器，可以根据实际的链接地址文件去初始化这个链接地址。如果文件编译在0x87800000地址处，则可执行
+
+  ```C
+  ldr r0, =0X87800000      /*  r0=0X87800000  */
+  MCR p15, 0, r0, c12, c0, 0   /* 将 r0 里面的数据写入到 c12 中，即 c12=0X87800000  */
+  ```
+
+#### 10.2 设备树描述
+
+#### 10.3 中断上半部
+
+​		在linux 中对于中断的处理分为中断上半部和下半部，中断上半部是中断ID对应的处理函数。我们要在linux中使能一个中断上半部处理函数，需要利用到下面这些API。
+
+* request_irq：该函数用于向linux申请中断。request_irq会引起线程的休眠，所以中断中不能使用该函数。其各个参数的含义分别见下方函数注释。
+
+  ```c
+  /*
+  *irq:硬件中断ID号
+  *handler:中断处理函数
+  *flags:一些中断处理标记,描述中断的状态，例如上升/下降沿触发、单次/多次触发等
+  *name:中断名字
+  *dev:传递给handler的参数， 如果是SPI（shared private interrupt）的话，需要用dev来区分不同的中断。
+  */
+  int request_irq(unsigned int      irq,   
+       			irq_handler_t     handler,   
+        			unsigned long     flags, 
+            		const char   	  *name,   
+      			void       		  *dev) 
+  ```
+
+* free_irq：释放中断资源，如果中断不是共享的，free_irq 会删除中断函数并且禁止中断。
+
+  ```c
+  /*
+  *irq:硬件中断ID号
+  *dev:传递给handler的参数， 如果是SPI（shared private interrupt）的话，需要用dev来区分不同的中断。
+  */
+  void free_irq(unsigned int    irq,   
+    				   void       *dev) 
+  ```
+
+* 中断处理函数定义：
+
+  ```c
+  irqreturn_t (*irq_handler_t) (int, void *) 
+  ```
+
+* 使能和静止中断：
+
+  ​		下方第一组是对于当个ID中断的使能或者禁止。但是其中的`disable_irq`会等待正在执行完的中断处理函数执行完才会返回。我们可以调用`disable_nosync`不等待同步，直接异步返回。
+
+  ​		下方第二组是对于全局中断的操作，但是这种操作方式是对整个中断的全局操作，而且A线程关闭的中断，可以被B线程调用同样的接口打开。比如 A 设置关闭中断后delay 10S后打开，但是现在进行任务调度，B线程中利用同样的接口关闭中断，5S后打开。5S后全局中断就会被打开，这样并没有达到A线程的目的。由此我们建议使用第三组接口。
+
+  ​		第三组接口中能够保存之前的中断现场，再disable 中断，并且在restore之后 恢复中断的现场。
+
+  ```c
+  /* 使能或禁止对应ID的中断 */
+  void enable_irq(unsigned int irq) 
+  void disable_irq(unsigned int irq)
+  void disable_nosync(unsigned int irq)
+      
+  /* 使能/禁止 全局中断 */
+  void local_irq_enable(void) 
+  void local_irq_disable(void) 
+      
+  /* 保护现场的使能/禁止中断 */
+  void local_irq_save(flags)   
+  void local_irq_restore(flags) 
+  ```
+
+#### 10.4 中断下半部
+
+​		linux 中中断是个特殊状态，其他线程都必须等中断中断任务执行完才能执行。所以中断中不能执行时间过久、也不能调用会引起睡眠的函数。对于有数据处理需求的，除了对实时性有要求的处理以外，其他任务我们建议放在中断的下半部去处理。linux为中断下半部提供了以下接口：
+
+##### 10.4.1 软中断
+
+​		==本质上的实现机制不清楚==
+
+​		软中断是linux中的一种下半部的实现机制，本质上是一个中断指针，并且内核中定义了10个大小的软中断数组来供线程调用使用。在SMP多核结构下，不同的核心调用软中断处理函数是相同的。部分定义代码可见下方代码区。
+
+```c
+/*softirq_action定义  */
+433 struct softirq_action 
+434 { 
+435     void    (*action)(struct softirq_action *); 
+436 }; 
+
+/* 软中断函数大小定义 */
+static struct softirq_action softirq_vec[NR_SOFTIRQS]; 
+/* 实际的数值表示 */
+enum 
+{ 
+    HI_SOFTIRQ=0,             /* 高优先级软中断     */ 
+    TIMER_SOFTIRQ,            /* 定时器软中断      */ 
+    NET_TX_SOFTIRQ,           /* 网络数据发送软中断   */ 
+    NET_RX_SOFTIRQ,           /* 网络数据接收软中断   */ 
+    BLOCK_SOFTIRQ,           
+    BLOCK_IOPOLL_SOFTIRQ,    
+    TASKLET_SOFTIRQ,          /* tasklet 软中断     */ 
+    SCHED_SOFTIRQ,            /* 调度软中断       */ 
+    HRTIMER_SOFTIRQ,          /* 高精度定时器软中断  */ 
+    RCU_SOFTIRQ,              /* RCU 软中断      */ 
+ 
+    NR_SOFTIRQS 
+}; 
+```
+
+​		linux中定义了全局软中断函数表，但是实际的函数内容还是可以被修改赋值的。可以调用`open_softirq`来**指定具体的软中断函数**。并且通过`raise_softirq`函数来触发软中断函数。
+
+​		需要注意的是，软中断具体函数的赋值操作需要在**编译阶段就指定好**，即**不支持动态修改软中断处理函数指针**。
+
+```c
+void open_softirq(int nr,    void (*action)(struct softirq_action *)) 
+void raise_softirq(unsigned int nr) 
+    
+/*实际使用例子 */
+634 void __init softirq_init(void) 
+635 { 
+636     int cpu; 
+637  
+638     for_each_possible_cpu(cpu) { 
+639         per_cpu(tasklet_vec, cpu).tail = 
+640             &per_cpu(tasklet_vec, cpu).head; 
+641         per_cpu(tasklet_hi_vec, cpu).tail = 
+642             &per_cpu(tasklet_hi_vec, cpu).head; 
+643     } 
+644  
+645     open_softirq(TASKLET_SOFTIRQ, tasklet_action); 
+646     open_softirq(HI_SOFTIRQ, tasklet_hi_action); 
+647 }    
+```
+
+##### 10.4.2 tasklet
+
+##### 10.4.3 工作队列
 
  
 
-
+#### 10.5 linux 中断使用demo
 
 
 
