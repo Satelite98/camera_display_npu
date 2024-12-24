@@ -1545,7 +1545,7 @@ gpioled.dev_stats = 0;
 
   ​		上图左侧是GIC的中断输入来源，总体可以分为三个部分：
 
-  * interrupt ID 0-15：SGI中断，由软件写GIC寄存器触发。是分别通知多个core的。
+  * interrupt ID 0-15：SGI 软件中断，由软件写GIC寄存器触发。是分别通知多个core的。
 
   * interrupt ID 16-31：PPI中断（Private Peripheral Interrupt），私有外设中断，也是分别通知各个core的。
 
@@ -1676,7 +1676,7 @@ gpioled.dev_stats = 0;
 
 ##### 10.4.1 软中断
 
-​		==本质上的实现机制不清楚==
+​		==本质上的实现机制不清楚==可以参考这个链接https://blog.csdn.net/heli200482128/article/details/126078721
 
 ​		软中断是linux中的一种下半部的实现机制，本质上是一个中断指针，并且内核中定义了10个大小的软中断数组来供线程调用使用。在SMP多核结构下，不同的核心调用软中断处理函数是相同的。部分定义代码可见下方代码区。
 
@@ -1732,17 +1732,233 @@ void raise_softirq(unsigned int nr)
 647 }    
 ```
 
+​		软中断具有一些自己的特性：
+
+1. 软中断是多个CPU CORE都能访问的，所以需要做好共享资源的临界区保护。
+2. 软中断是等待内核线程的调度执行，软中断中不能嵌套软中断触发。
+3. 软中断函数是静态编译的，在运行中部可以更改。
+4. 运行在中断上下文中，不能进入**睡眠和阻塞**。
+
 ##### 10.4.2 tasklet
 
-##### 10.4.3 工作队列
+​		上面描述了部分软中断的特殊性，tasklet是一种特殊的软中断实现方式，同样不能被**阻塞和睡眠**，相较于软中断，taklet有下面几个特点：
 
+1. 一种特定类型的tasklet 只能允许在一个CPU上，不同类型的taklet可以运行在不同的core上。这样减小了tasklet函数的编写难度。
+
+2. 支持动态指定处理函数，可以在运行时指定响应函数，更方便驱动中使用该机制。
+
+​     tasklet本质上是利用两种类型的软中断（`HI_SOFTIRQ、TASKLET_SOFTIRQ`）实现的，在实际的驱动开发中，我们会更建议使用tasklet。tasklet 在linux中的API中的接口如下，从接口也可以看出，tasklet 是一个链表。
+
+```c
+/* 结构定义 */
+484 struct tasklet_struct 
+485 { 
+486     struct tasklet_struct *next;    /* 下一个 tasklet       */ 
+487     unsigned long state;              /* tasklet 状态         */ 
+488     atomic_t count;                   /* 计数器，记录对 tasklet 的引用数 */ 
+489     void (*func)(unsigned long);    /* tasklet 执行的函数     */ 
+490     unsigned long data;               /* 函数 func 的参数      */ 
+491 };
+
+void tasklet_init(struct tasklet_struct    *t, 
+                  void (*func)(unsigned long),   
+      			  unsigned long    data); 
+void tasklet_schedule(struct tasklet_struct *t) /* 将对应的tasklet 加入调度队列 */
+    
+··
+```
+
+如果需要使用tasklet 可以按照下面的顺序实现
+
+1. 定义以恶搞tasklet 、tasklet_func并且在模块init函数中初始化。
+2. 初始化改模块的中断函数，并且在中断函数中调用`tasklet_schedule(tasklet);`以实现下半部的运行。
+
+```c
+/* 定义 taselet       */ 
+struct tasklet_struct testtasklet; 
  
+/* tasklet 处理函数     */ 
+void testtasklet_func(unsigned long data) 
+{ 
+    /* tasklet 具体处理内容 */ 
+} 
+ 
+/* 中断处理函数 */ 
+irqreturn_t test_handler(int irq, void *dev_id) 
+{ 
+    ...... 
+    /* 调度 tasklet     */ 
+    tasklet_schedule(&testtasklet); 
+    ...... 
+} 
+ 
+/* 驱动入口函数        */ 
+static int __init xxxx_init(void) 
+{ 
+    ...... 
+    /* 初始化 tasklet     */   
+    tasklet_init(&testtasklet, testtasklet_func, data); 
+    /* 注册中断处理函数    */ 
+    request_irq(xxx_irq, test_handler, 0, "xxx", &xxx_dev); 
+    ...... 
+} 
+```
+
+  ##### 10.4.3 工作队列
+
+​        软中断和tasklet 都是在中断上下文中运行的（硬件中断处理完毕，但是还是在linux中断机制中，没有回到进程上下文环境），是不允许睡眠和阻塞的。对此，如果中断下半部的处理优先级要更弱一些，linux为我们提供了一种机制为工作队列（work_struct）中去执行。实际的执行函数是在**内核线程**中去运行的，由此可以调用睡眠/阻塞的API函数。如何选择你的下半部函数是用工作队列还是软中断/tasklet呢？可以参考下面几点：
+
+1. 如果推后执行的任务需要睡眠，那么只能选择工作队列。
+2. 如果推后执行的任务需要延时指定的时间再触发，那么使用工作队列，因为其可以利用timer延时(内核定时器实现)。
+3. 如果推后执行的任务需要在一个tick之内处理，则使用软中断或tasklet，因为其可以抢占普通进程和内核线程，同时不可睡眠。
+4. 如果推后执行的任务对延迟的时间没有任何要求，则使用工作队列，此时通常为无关紧要的任务
+
+对于工作队列的使用，linux同样给我们提供了一些API函数：
+
+关于工作队列的结构体，就是以`work_struct`组成的一个list链表及其描述。
+
+```c
+/* work 结构体 */
+struct work_struct { 
+    atomic_long_t data;     
+    struct list_head entry;  
+    work_func_t func;         /* 工作队列处理函数  */ 
+}; 
+
+/* 工作队列结构体 */
+struct workqueue_struct { 
+    struct list_head    pwqs;        
+    struct list_head    list;        
+    struct mutex        mutex;       
+    int         work_color;  
+    int         flush_color;     
+    atomic_t        nr_pwqs_to_flush;  
+    struct wq_flusher   *first_flusher;  
+    struct list_head    flusher_queue;   
+    struct list_head    flusher_overflow; 
+    struct list_head    maydays;     
+    struct worker       *rescuer;    
+    int         nr_drainers;     
+    int         saved_max_active;  
+    struct workqueue_attrs  *unbound_attrs;  
+    struct pool_workqueue   *dfl_pwq;    
+    char            name[WQ_NAME_LEN];  
+    struct rcu_head     rcu; 
+    unsigned int        flags ____cacheline_aligned;  
+    struct pool_workqueue __percpu *cpu_pwqs;  
+    struct pool_workqueue __rcu *numa_pwq_tbl[];  
+};
+```
+
+在linux中，每一个CPU有自己的工作线程worker，每个worker线程中有一个工作队列指针，描述工作队列中的所有工作。
+
+```c
+struct worker { 
+    union { 
+        struct list_head    entry;   
+        struct hlist_node   hentry;  
+    }; 
+    struct work_struct  *current_work;   
+    work_func_t     current_func;    
+    struct pool_workqueue   *current_pwq;  
+    bool            desc_valid;  
+    struct list_head    scheduled;   
+    struct task_struct  *task;       
+    struct worker_pool  *pool;                       
+    struct list_head    node;        
+    unsigned long       last_active;     
+    unsigned int        flags;       
+    int          id;      
+    char            desc[WORKER_DESC_LEN]; 
+    struct workqueue_struct *rescue_wq;  
+}; 
+```
+
+在实际的驱动处理中，我们并不需要对内核线程有管理，只需要进行work 的初始化就行了，内核会自动加入队列然后工作。利用工作队列的使用demo可见下方：
+
+```c
+/* 定义工作(work)           */ 
+struct  work_struct testwork; 
+
+void testwork_func_t(struct work_struct *work); 
+{ 
+    /* work 具体处理内容   */ 
+} 
+
+/* 中断处理函数        */ 
+irqreturn_t test_handler(int irq, void *dev_id) 
+{ 
+    ...... 
+    /* 调度 work          */ 
+    schedule_work(&testwork); 
+    ...... 
+} 
+
+/* 驱动入口函数             */ 
+static int __init xxxx_init(void) 
+{ 
+    ...... 
+    /* 初始化 work         */ 
+    INIT_WORK(&testwork, testwork_func_t); 
+    /* 注册中断处理函数      */ 
+    request_irq(xxx_irq, test_handler, 0, "xxx", &xxx_dev); 
+    ...... 
+} 
+```
 
 #### 10.5 linux 中断使用demo
 
+#### 10.6 为什么软中断和tasklet 还在中断上下文中？不是硬件中断已经处理结束了吗？
 
+在 Linux 中，软中断（softirq）和 tasklet 是运行在中断上下文中的，而不是进程上下文。这是因为它们的设计目标就是处理高效的、无需阻塞的短任务，并且尽量减少延迟对系统的影响。让我们详细拆解一下你的疑问：
 
+##### 10.6.1. 软中断和 tasklet 的运行上下文
 
+* 软中断和tasklet 是内核中处理某些延迟工作的重要机制，它们运行在中断上下文中。
+  * 中断上下文的特点：
+    * 没有专属的进程（没有 `task_struct`）。
+    * 不能进行阻塞（如睡眠、等待）。
+    * 运行时必须快速完成任务，以免影响系统其他部分的响应。
+  * **软中断**和 **tasklet** 共享这些特点，因此它们运行在中断上下文，而不是进程上下文。
+
+------
+
+##### 10.6.2. **为什么软中断和 tasklet 不在进程上下文中？**
+
+当硬中断触发时，Linux 可能会挂起当前进程，并进入中断处理程序。在硬中断中，时间有限，因此设计了软中断机制，将部分较复杂或非紧急的任务推迟到稍后执行，以提高系统效率。
+
+* **软中断的执行时机：**
+  * 软中断是在硬中断处理程序返回后，由内核调度器安排执行的，典型场景是通过检查 `softirq` 的标志位，在返回用户态或切换上下文时执行。
+  * 尽管硬中断的处理已经结束，但软中断和 tasklet 并未脱离中断上下文。它们依然是运行在内核的中断处理机制中，不会切换到特定的进程上下文。
+* **避免阻塞的需求：**
+  * 中断上下文下的代码执行不能引发阻塞操作（如睡眠），因为阻塞会导致整个系统性能下降，甚至死锁。
+  * 因此，软中断和 tasklet 是一种轻量级的工作方式，它们在中断上下文中执行，避免切换到进程上下文以节省资源。
+
+------
+
+##### 10.6.3. **“退出中断” 与软中断**
+
+软中断和 tasklet 的确是在硬中断处理完毕后开始执行的，但从内核的视角来看：
+
+* 硬中断执行完后，进入软中断的执行时，依然视为中断上下文的一部分。
+* **没有完全退出中断上下文**，因为内核还没有恢复到具体的进程上下文，也没有回到用户态。
+
+换句话说，尽管硬中断已经完成，但软中断和 tasklet 的运行环境仍然是中断上下文，不是进程上下文。
+
+------
+
+##### 10.6.4. **如何理解“上下文”**
+
+* **中断上下文**：系统在处理中断时运行的环境，与具体进程无关，无法睡眠或进行阻塞操作。
+* **进程上下文**：关联到具体的用户进程，允许睡眠，可以执行阻塞操作。
+
+软中断和 tasklet 属于中断上下文，内核为了性能考虑设计如此。如果需要阻塞操作或更复杂的处理，可以通过 **工作队列（workqueue）** 把任务推到进程上下文中处理。
+
+------
+
+##### 10.6.5 总结
+
+软中断和 tasklet 的运行时机虽然在硬中断之后，但依然属于中断上下文。它们没有“退出中断”，因为其设计目标是快速处理无需阻塞的任务，而不涉及具体的进程上下文。
 
 
 
