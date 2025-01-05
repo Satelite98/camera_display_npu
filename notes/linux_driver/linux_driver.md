@@ -2,7 +2,7 @@
 
 # linux 驱动学习
 
-##　一、字符驱动
+###　一、字符驱动
 
 其次本次研究的为什么叫字符设备，就是因为在数据读取的时候都是`一个一个字节`的方式来传输的。
 
@@ -10,7 +10,7 @@ linux 中驱动的调用接口都如下图所示：任何的驱动文件成功�
 
 ![image-20241016213210180](D:\ForStudy\camera_dispaly_npu\camera_display_npu\notes\linux_driver\Untitled.assets\image-20241016213210180.png)
 
-### 1.1 字符设备开发顺序
+#### 1.1 字符设备开发顺序
 
 * **加载和卸载：**一个模块的驱动主要加载和卸载的接口就是`module_init(xxx_init);   `和`module_exit(xxx_exit); `两个函数。在实际的加载和卸载的指令的时候用的是`insmode drv.ko`和`rmmode drv.ko`这两个命令。
 
@@ -71,7 +71,7 @@ linux 中驱动的调用接口都如下图所示：任何的驱动文件成功�
 
   
 
-### 1.2 设备号
+#### 1.2 设备号
 
  	设备号的类型定义见下文，本质上是一个无符号32位数据。并且对于32位机器来说，这低20位表示次设备号，高12位表示主设备号。
 
@@ -99,18 +99,18 @@ typedef __kernel_dev_t		dev_t;
   
   ```
 
-### 1.3 编写第一个字符程序
+#### 1.3 编写第一个字符程序
 
 ​		具体的程序可见代码 `/home/wxwang/imax6ull/opendv/linux_kernel/drivers/my_driver/virtual_cchrdevbase.c`，这里面需要注意的就是介绍了**printk和copytouser**的函数的使用。根据编译报错问题，注意点如下：
 
 * `__exit`中有两个下划线
 * 当你去拷贝这些函数指针的时候`int (*release) (struct inode *, struct file *);`拷贝过来之后还需要对这些指针实例化见`int chrdevbase_release(struct inode *inode, struct file *filep)`
 
-### 1.4 编写第一个测试程序及编译
+#### 1.4 编写第一个测试程序及编译
 
-### 1.5 驱动文件的编译和加载
+#### 1.5 驱动文件的编译和加载
 
-#### 1.5.1 程序编译
+##### 1.5.1 程序编译
 
 * **程序编译：**make file和注释可见下面的代码段。在linux 环境中执行`make -j4`就能够编译成功啦。
 
@@ -128,7 +128,7 @@ clean:
 	$(MAKE) -C $(KERNELDIR) M=$(CURRENT_PATH) clean 
 ```
 
-#### 1.5.2 程序加载：
+##### 1.5.2 程序加载：
 
 * 开发板和电脑的文件传输：这里可能需要从boot 相关的代码开始看。
 
@@ -2447,7 +2447,7 @@ struct poll_table_struct *wait)
   282 { 
   283     return imx6uirq_fasync(-1, filp, 0); 
   284 } 
-  
+          
   286 /* 设备操作函数 */ 
   287 static struct file_operations imx6uirq_fops = { 
   288     .owner = THIS_MODULE, 
@@ -2461,15 +2461,325 @@ struct poll_table_struct *wait)
   
   
 
-​     
+### 13. Platfrom 设备驱动开发
 
-​     
+​		在linux中，由于很多板级的开发包用的IP都是同一个原厂的，这样，这些IP的驱动也就是一样的。当我们在一款SOC芯片/板级开发包使用对应的外设/板级外围设备时，我们期望只需要提供一定的设备信息，就能够正常使用。**Platfrom 总线**就是LINUX的解决思路。如下图所示，paltfrom 总线将外设分为 **驱动** 和 **设备**两个部分，当向内核注册设备/驱动时，总线会查询有没有匹配的驱动/设备，如果匹配，对应的程序就会执行。而用于匹配驱动(driver)/设备(device)的就是**总线（Platfrom）**
 
-  ​    
+<img src=".\linux_driver.assets\image-20250105195037834.png" width=60%>
+
+Linux 中利用`bus_type`来表示总线。platfrom 总线也是`bus_type`的一种。两者定义可见下方代码。可见platfrom 是实现了`bus_type`的一些函数。
+
+```c
+struct bus_type {
+	const char		*name;
+	const char		*dev_name;
+	struct device		*dev_root;
+	struct device_attribute	*dev_attrs;	/* use dev_groups instead */
+	const struct attribute_group **bus_groups;
+	const struct attribute_group **dev_groups;
+	const struct attribute_group **drv_groups;
+
+	int (*match)(struct device *dev, struct device_driver *drv);    /* 很重要，匹配函数 */
+	int (*uevent)(struct device *dev, struct kobj_uevent_env *env);
+	int (*probe)(struct device *dev);
+	int (*remove)(struct device *dev);
+	void (*shutdown)(struct device *dev);
+
+	int (*online)(struct device *dev);
+	int (*offline)(struct device *dev);
+
+	int (*suspend)(struct device *dev, pm_message_t state);
+	int (*resume)(struct device *dev);
+
+	const struct dev_pm_ops *pm;
+
+	const struct iommu_ops *iommu_ops;
+
+	struct subsys_private *p;
+	struct lock_class_key lock_key;
+};
+/* platform_bus_type */
+struct bus_type platform_bus_type = {
+	.name		= "platform",
+	.dev_groups	= platform_dev_groups,
+	.match		= platform_match,
+	.uevent		= platform_uevent,
+	.pm		= &platform_dev_pm_ops,
+};
+
+```
+
+​	于是我们可以看出`platform_bus_type`是利用`platform_match`函数做match的，我们进一步查看这个函数，能够发现，platfrom总线提供了**四种匹配机制**：
+
+1. 利用设备树查找设备，查看`device_driver`中的`of_match_table`和传参进来的`dev node`有没有能够匹配上的属性。
+
+2.  ACPI 匹配方式，
+
+3.  id_table 匹配方式，`platform_driver`结构体中有一个`id_table`的结构体，如果是用`platform_driver`定义的driver的话就会包含整个table 表格用于和设备匹配。**注意：**此方式不是用设备树的实现方式。
+
+4.  直接比较传入driver的名字和device 的名字时候是否匹配。但是这里注意，实际上用的是`platform_device`和`device_driver`两个结构体的定义，而不是`platform_driver`的定义。
+
+   ```c
+   static int platform_match(struct device *dev, struct device_driver *drv)
+   {
+   	struct platform_device *pdev = to_platform_device(dev);
+   	struct platform_driver *pdrv = to_platform_driver(drv);
+   
+   	/* When driver_override is set, only bind to the matching driver */
+   	if (pdev->driver_override)
+   		return !strcmp(pdev->driver_override, drv->name);
+   
+   	/* Attempt an OF style match first */
+   	if (of_driver_match_device(dev, drv))
+   		return 1;
+   
+   	/* Then try ACPI style match */
+   	if (acpi_driver_match_device(dev, drv))
+   		return 1;
+   
+   	/* Then try to match against the id table */
+   	if (pdrv->id_table)
+   		return platform_match_id(pdrv->id_table, pdev) != NULL;
+   
+   	/* fall-back to driver name match */
+   	return (strcmp(pdev->name, drv->name) == 0);
+   }
+   
+   ```
+
+   
+
+#### 13.1 Platfrom driver
+
+platfrom driver的结构体如下所示
+
+```c
+struct platform_driver {
+	int (*probe)(struct platform_device *);
+	int (*remove)(struct platform_device *);
+	void (*shutdown)(struct platform_device *);
+	int (*suspend)(struct platform_device *, pm_message_t state);
+	int (*resume)(struct platform_device *);
+	struct device_driver driver;
+	const struct platform_device_id *id_table;
+	bool prevent_deferred_probe;
+};
+```
+
+其中，device_driver也是一个很重要的结构体，见下所示：
+
+```c
+struct device_driver {
+	const char		*name;
+	struct bus_type		*bus;
+
+	struct module		*owner;
+	const char		*mod_name;	/* used for built-in modules */
+
+	bool suppress_bind_attrs;	/* disables bind/unbind via sysfs */
+
+	const struct of_device_id	*of_match_table;
+	const struct acpi_device_id	*acpi_match_table;
+
+	int (*probe) (struct device *dev);
+	int (*remove) (struct device *dev);
+	void (*shutdown) (struct device *dev);
+	int (*suspend) (struct device *dev, pm_message_t state);
+	int (*resume) (struct device *dev);
+	const struct attribute_group **groups;
+
+	const struct dev_pm_ops *pm;
+
+	struct driver_private *p;
+};
+```
+
+​		两个结构体的表示可以见上，从这里我们可以看出，`device_driver`类似于一个基类，`platform_driver`继承了`device_driver`的很多函数。这里也能和刚刚`platfrom match`函数对应起来。不同的match 路径就会执行不同的`probe`函数。
+
+​		其中`platform_driver`结构体利用`id_table`去匹配设备，也就是会和`platform_device`对应起来使用。`id_table`具体的定义如下。而`device_driver`就是会利用`of_match_table`来匹配设备了，一般配合设备树使用。
+
+```c
+struct platform_device_id {
+	char name[PLATFORM_NAME_SIZE];
+	kernel_ulong_t driver_data;
+};
+```
+
+​		对于驱动开发而言，利用**Platfrom bus**就是去开发driver的这些函数，其中**probe**额外的重要，因为probe函数是设备match之后会执行的函数。相当于init。
+
+​		当我们开发好platfrom driver 之后就可以向设linux 中注册驱动了，会调用register和unregister。
+
+```c
+int platform_driver_register (struct platform_driver    *driver) 
+void platform_driver_unregister(struct platform_driver *drv) 
+```
+
+​		基本的Platfrom 驱动框架如下所示，这种就是用设备树来匹配的情况啦。==但是没用driver 的probe和remove，用的是platfrom的，可能内核是判断分别执行？==
+
+```c
+   /* 设备结构体 */ 
+1   struct xxx_dev{ 
+2     struct cdev cdev; 
+3     /* 设备结构体其他具体内容 */ 
+4   }; 
+5   
+6   struct xxx_dev xxxdev;   /* 定义个设备结构体变量 */ 
+7   
+8   static int xxx_open(struct inode *inode, struct file *filp) 
+9   {     
+10    /* 函数具体内容 */ 
+11    return 0; 
+12  } 
+13  
+14 static ssize_t xxx_write(struct file *filp, const char __user *buf,  
+		size_t cnt, loff_t *offt) 
+15  { 
+16    /* 函数具体内容 */ 
+17    return 0; 
+18  }
+
+23  static struct file_operations xxx_fops = { 
+24    .owner = THIS_MODULE, 
+25    .open = xxx_open, 
+26    .write = xxx_write, 
+27  }; 
+
+29 /* 
+30  * platform 驱动的 probe 函数 
+31  * 驱动与设备匹配成功以后此函数就会执行 
+32  */ 
+33  static int xxx_probe(struct platform_device *dev) 
+34  {     
+35    ...... 
+36    cdev_init(&xxxdev.cdev, &xxx_fops); /* 注册字符设备驱动 */ 
+37    /* 函数具体内容 */ 
+38    return 0; 
+39  } 
+
+41  static int xxx_remove(struct platform_device *dev) 
+42  { 
+43    ...... 
+44    cdev_del(&xxxdev.cdev);/*  删除 cdev */ 
+45    /* 函数具体内容 */ 
+46    return 0; 
+47  } 
+
+49 /* 匹配列表 */ 
+50 static const struct of_device_id xxx_of_match[] = { 
+51    { .compatible = "xxx-gpio" }, 
+52     { /* Sentinel */ } 
+53 }; 
+
+55 /*  
+56  * platform 平台驱动结构体 
+57  */ 
+58  static struct platform_driver xxx_driver = { 
+59    .driver = { 
+60        .name       = "xxx", 
+61        .of_match_table = xxx_of_match, 
+62    }, 
+63    .probe      = xxx_probe, 
+64    .remove     = xxx_remove, 
+65  }; 
+79  module_init(xxxdriver_init); 
+80  module_exit(xxxdriver_exit); 
+81  MODULE_LICENSE("GPL"); 
+82  MODULE_AUTHOR("zuozhongkai"); 
+```
+
+**思路总结：**platfrom 设备并不是独立于字符设备、块设备、网络设备之外的驱动，只是提供了一总设备和驱动匹配的接口。本质上的驱动还是执行的对应IP的驱动。
 
 
 
+#### 13.2 Platfrom driver
 
+​      对于 driver 能够有两种方式能够去描述，那么对于设备信息，也会存在`device` 和`platform_device`这两种表现形式。同样的，这也是基类 和继承类的关系
+
+```c
+
+struct platform_device {
+	const char	*name;
+	int		id;
+	bool		id_auto;
+	struct device	dev;
+	u32		num_resources;
+	struct resource	*resource;  /* 表示资源 */
+
+	const struct platform_device_id	*id_entry;
+	char *driver_override; /* Driver name to force a match */
+
+	/* MFD cell pointer */
+	struct mfd_cell *mfd_cell;
+
+	/* arch specific additions */
+	struct pdev_archdata	archdata;
+};
+
+18 struct resource { 
+19    resource_size_t   start; 
+20    resource_size_t   end; 
+21    const char     *name; 
+22    unsigned long    flags; 
+23    struct resource   *parent, *sibling, *child; 
+24 }; 
+```
+
+同样的，当我们用`platform_device`描述完设备信息之后，也需要用接口向linux中注册。
+
+```c
+int platform_device_register(struct platform_device *pdev) 
+void platform_device_unregister(struct platform_device *pdev) 
+```
+
+一个使用`platform_device`来描述设备信息的例子如下：
+
+```c
+1  /* 寄存器地址定义*/ 
+2  #define PERIPH1_REGISTER_BASE    (0X20000000) /* 外设 1 寄存器首地址 */     
+3  #define PERIPH2_REGISTER_BASE    (0X020E0068) /* 外设 2 寄存器首地址 */ 
+4  #define REGISTER_LENGTH           4 
+5   
+6  /* 资源 */ 
+7  static struct resource xxx_resources[] = { 
+8     [0] = { 
+9          .start  = PERIPH1_REGISTER_BASE, 
+10        .end    = (PERIPH1_REGISTER_BASE + REGISTER_LENGTH - 1), 
+11        .flags  = IORESOURCE_MEM, 
+12    },   
+13    [1] = { 
+14        .start  = PERIPH2_REGISTER_BASE, 
+15        .end    = (PERIPH2_REGISTER_BASE + REGISTER_LENGTH - 1), 
+16        .flags  = IORESOURCE_MEM, 
+17    }, 
+18 }; 
+19  
+20 /* platform 设备结构体 */ 
+21 static struct platform_device xxxdevice = { 
+22    .name = "xxx-gpio", 
+23    .id = -1, 
+24    .num_resources = ARRAY_SIZE(xxx_resources), 
+25    .resource = xxx_resources, 
+26 }; 
+
+28 /* 设备模块加载 */ 
+29 static int __init xxxdevice_init(void) 
+30 { 
+31    return platform_device_register(&xxxdevice); 
+32 } 
+33  
+34 /* 设备模块注销 */ 
+35 static void __exit xxx_resourcesdevice_exit(void) 
+36 { 
+37    platform_device_unregister(&xxxdevice); 
+38 } 
+39  
+40 module_init(xxxdevice_init); 
+41 module_exit(xxxdevice_exit); 
+42 MODULE_LICENSE("GPL"); 
+43 MODULE_AUTHOR("zuozhongkai"); 
+```
+
+以上，可以发现，Linux Platfrom 就是一组提供匹配机制的接口，我们只要按照接口定义好规对于的函数，当同时注册了driver和device时，对于的驱动函数就能执行。而且`driver`和`device`还有不同的表现形式。
 
 
 
