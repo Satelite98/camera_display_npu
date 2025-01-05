@@ -1960,7 +1960,520 @@ static int __init xxxx_init(void)
 
 软中断和 tasklet 的运行时机虽然在硬中断之后，但依然属于中断上下文。它们没有“退出中断”，因为其设计目标是快速处理无需阻塞的任务，而不涉及具体的进程上下文。
 
+---
 
+
+
+
+
+### 11. 阻塞和非阻塞IO
+
+​	阻塞IO和非阻塞IO是应用层调用驱动的两种方式。其中，**阻塞IO**是指在调用驱动设备时，如果不能获取设备资源，就是使应用层进入阻塞状态(休眠状态)，待能获取驱动资源时，会进入调度状态。而**非阻塞IO**是指，当无法获取硬件资源时，会返回结果，应用程序可以执行别的操作。应用层调用的接口如下：
+
+```c
+4 fd = open("/dev/xxx_dev", O_RDWR);     /* 阻塞方式打开  */ 
+5 ret = read(fd, &data, sizeof(data));    /* 读取数据    */ 
+
+4 fd = open("/dev/xxx_dev", O_RDWR | O_NONBLOCK);  /* 非阻塞方式打开 */ 
+5 ret = read(fd, &data, sizeof(data));          /* 读取数据 */ 
+```
+
+​	下面分别介绍了阻塞IO和非阻塞IO的驱动实现方法：
+
+#### 11.1等待队列
+
+​	等待队列也是linux内核提供的一种机制，能够使加入等待队列的线程进入睡眠状态（让出CPU资源）。我们可以在驱动中加入等待队列，并且让线程调用驱动时，如果没有资源，就加入等待队列，以实现阻塞IO的功能。
+
+* **等待队列API接口：**
+
+  1. **等待队列头：**引用等待队列需要先定义一个等待队列头，才能够使用等待队列项，下方是linux系统中等待队列头的结构体。
+
+     ```c
+     /* 示例代码 52.1.2.1 wait_queue_head_t 结构体 */ 
+     39 struct __wait_queue_head { 
+     40  spinlock_t      lock; 
+     41  struct list_head    task_list; 
+     42 }; 
+     43 typedef struct __wait_queue_head wait_queue_head_t; 
+     ```
+
+  2. **等待队列项：**实际的等待队列是根据等待队列项进行调度的，我们驱动中也要将线程和对应的等待队列项绑定，然后加入等待队列中，实现阻塞IO。
+
+     我们利用`DECLARE_WAITQUEUE(name, tsk) ` 就可以初始化一个等待队列项，其中`name`是等待队列的名字，`tsk`表示这个等待队列属于哪个进程，一般会定义为`current`。这个宏的实现就是定义了一个这个名字的等待队列，并且把`private`指针指向了当前进程。
+
+     ```c
+     /* 示例代码 52.1.2.2 wait_queue_t  结构体  */
+      struct __wait_queue { 
+         unsigned int          flags; 
+         void                   *private; 
+         wait_queue_func_t     func; 
+         struct list_head      task_list; 
+          }; 
+      typedef struct __wait_queue wait_queue_t; 
+     
+     #define __WAITQUEUE_INITIALIZER(name, tsk) {				\
+     	.private	= tsk,						\
+     	.func		= default_wake_function,			\
+     	.task_list	= { NULL, NULL } }
+     
+     #define DECLARE_WAITQUEUE(name, tsk)					\
+     	wait_queue_t name = __WAITQUEUE_INITIALIZER(name, tsk)
+     ```
+
+  3.　**向队列中添加/移除队列项：**当资源不可访问时，我们需要将对应的队列项加入等待队列头，才能让该进程睡眠。相反，当进程不在需要此类资源后，我们需要将对应的等待队列移出链表。
+
+     ```c
+     /* 加入队列 */
+     void add_wait_queue(wait_queue_head_t    *q,    
+                 wait_queue_t      *wait) 
+     /* 移出队列 */
+     void remove_wait_queue(wait_queue_head_t    *q,   
+                 wait_queue_t       *wait) 
+     ```
+
+  4.　**唤醒等待队列API：**当资源可以用的使用，需要唤醒对应等待队列中的进程。wake_up 函数可以唤醒处于 TASK_INTERRUPTIBLE 和 TASK_UNINTERRUPTIBLE 状态的进程，而 wake_up_interruptible 函数只能唤醒处于 TASK_INTERRUPTIBLE 状态的进程。 
+
+     ```c
+     void wake_up(wait_queue_head_t *q) 
+     void wake_up_interruptible(wait_queue_head_t *q) 
+     ```
+
+  5.　**设置等待队列唤醒条件：** 系统中为我们留了一些设定等待队列唤醒的接口，分别如下：
+
+     ```c
+     wait_event(wq, condition)  /*等待以 wq 为等待队列头的等待队列被唤醒，前提是 condition 条件必须满足(为真)，否则一直阻塞 */
+         
+     wait_event_timeout(wq, condition, timeout)  /* 功能和 wait_event 类似，但是此函数可以添加超时时间，以 jiffies 为单位。此函数有返回值，如果返回 0 的话表示超时时间到，而且Condition为假。为 1 的话表示 condition 为真，也就是条件满足了。*/ 
+         
+     wait_event_interruptible(wq, condition) /* 与 wait_event 函数类似，但是此函数将进程设置为 TASK_INTERRUPTIBLE，就是可以被信号打断。 */
+         
+     wait_event_interruptible_timeout(wq, condition, timeout)/*与 wait_event_timeout 函数类似， */
+     ```
+
+     
+
+#### 11.2 轮询
+
+* **应用层的轮询处理接口：**
+
+  1. select 函数 ：select 函数用于监测一组文件的读、写、异常情况，并且可以定义一个timeout 时间来实现**IO非阻塞**的处理。该函数返回0表示超时不可访问，返回-1 表示异常。
+
+     ```c
+     int select(int        nfds,    /* 所要监视的这三类文件描述集合中，最大文件描述符加 1。 */
+         	fd_set      *readfds,   /* 描述符集合 */
+             fd_set      *writefds, 	/* 描述符集合 */
+              fd_set     *exceptfds,  /* 描述符集合 */
+          	 struct timeval   *timeout) /* 等待时间 */
+         
+     /* fd set 结构体 */
+     typedef struct {
+     	unsigned long fds_bits[__FD_SETSIZE / (8 * sizeof(long))];
+     } __kernel_fd_set;
+     ```
+
+     具体的应用层select 非阻塞访问的流程可见下方代码：
+
+     ```c
+     1  void main(void) 
+     2  { 
+     3     int ret, fd;                   /* 要监视的文件描述符     */ 
+     4     fd_set readfds;               /* 读操作文件描述符集     */ 
+     5     struct timeval timeout;       
+     6   
+     7     fd = open("dev_xxx", O_RDWR | O_NONBLOCK);   /* 非阻塞式访问 */ 
+     8   
+     9     FD_ZERO(&readfds);          /* 清除 readfds       */ 
+     10    FD_SET(fd, &readfds);      /* 将 fd 添加到 readfds 里面 */ 
+     11       
+     12   
+     13    timeout.tv_sec = 0; 
+     14    timeout.tv_usec = 500000;   
+     15       
+     16    ret = select(fd + 1, &readfds, NULL, NULL, &timeout); 
+     17    switch (ret) { 
+     18        case 0:             /* 超时     */ 
+     19            printf("timeout!\r\n"); 
+     20             break; 
+     21        case -1:            /* 错误     */ 
+     22             printf("error!\r\n"); 
+     23             break; 
+     24        default:      /* 可以读取数据 */ 
+     25             if(FD_ISSET(fd, &readfds)) { /* 判断是否为 fd 文件描述符 */ 
+     26                 /* 使用 read 函数读取数据 */ 
+     27             } 
+     28             break; 
+     29    }    
+     30 } 
+     ```
+
+  2. poll 函数 ：poll 函数的作用和select 函数类似，只不过select 函数最大只能处理1024个文件描述符的情况，而poll 函数没有最大文件描述符的限制。其中采用了`struct pollfd `结构体来描述了要监视的文件和监视事件。
+
+     ```c
+     int poll(struct pollfd    *fds,   /* 描述要监视的文件及类型 */
+           		nfds_t      nfds,   
+          		 int        timeout) 
+     
+         
+     /* struct pollfd 结构体 */   
+      struct pollfd { 
+       int      fd;            /*  文件描述符    */ 
+       short events;        /*  请求的事件    */ 
+       short revents;          /*  返回的事件    */ 
+     }; 
+     
+     /*
+         POLLIN      有数据可以读取。 
+         POLLPRI      有紧急的数据需要读取。 
+         POLLOUT    可以写数据。 
+         POLLERR    指定的文件描述符发生错误。 
+         POLLHUP    指定的文件描述符挂起。 
+         POLLNVAL    无效的请求。 
+         POLLRDNORM  等同于 POLLIN
+     */
+      
+     ```
+
+  3. epoll 函数 ：select 和poll 函数都会出现随着监听fd的事件增多，而出现效率低下的问题，而epoll适用于处理高并发的项目需求。
+
+     ```c
+     int epoll_create(int size) /* 创建个句柄 */
+         
+     int epoll_ctl(int          epfd,  /* epoll 句柄 */
+           		  int          op,    /* ：表示要对 epfd(epoll 句柄)进行的操作 */
+            		  int        fd,      /* 要监视的文件描述符 */
+              	  struct epoll_event    *event) /* 要监视的事件类型 */
+     ```
+
+* **非阻塞访问时驱动底层接口：**
+
+  以上应用层代码轮询查询 最终都会调用驱动接口的poll函数，我们需要再驱动程序中的POLL函数中调用`poll_wait`函数，`poll_wait`函数不会引起阻塞，只是会将应用程序添加到poll_table 函数中去。
+
+  ```c
+  unsigned int (*poll) (struct file *filp, struct poll_table_struct *wait) 
+  
+  void poll_wait(struct file * filp, wait_queue_head_t * wait_address, poll_table *p) 
+      
+  ```
+
+  
+
+#### 11.3 阻塞IO 代码实现逻辑
+
+​		此驱动逻辑是应用层监控按键是否被按下，如果没有被按下就阻塞。其实现逻辑是在设备私有结构体中定义了一个**等待队列头部**，在read函数中会定义一个等待队列项，判断按键是否按下，如果没有按下的话，就加入等待队列。当**唤醒时候**会判断是不是由中断唤醒的，不是的话就返回错误信号，是的话就正常执行流程。
+
+​		由此，我们需要在案件中断中，唤醒对应的等待队列。
+
+```c
+46  /* imx6uirq 设备结构体 */ 
+47  struct imx6uirq_dev{ 
+            ......
+            ......
+61      wait_queue_head_t r_wait;    /* 读等待队列头 */ 
+62  }; 
+
+/* 1. init */
+118 static int keyio_init(void) 
+119 { 
+		......
+        ......
+167     /* 初始化等待队列头 */ 
+168     init_waitqueue_head(&imx6uirq.r_wait); 
+169     return 0; 
+170 } 
+
+/* 2. read 的时候阻塞 */
+193 static ssize_t imx6uirq_read(struct file *filp, char __user *buf,  
+												size_t cnt, loff_t *offt) 
+194 { 
+                    ......
+                    ......    
+ 
+208     DECLARE_WAITQUEUE(wait, current);  		  /* 定义一个等待队列 */ 
+209     if(atomic_read(&dev->releasekey) == 0) {  /* 没有按键按下 */ 
+210         add_wait_queue(&dev->r_wait, &wait);  /* 添加到等待队列头 */ 
+211         __set_current_state(TASK_INTERRUPTIBLE);/* 设置任务状态 */ 
+212         schedule();                             /* 进行一次任务切换 */ 
+213         if(signal_pending(current)) {   		/* 判断是否为信号引起的唤醒 */ 
+214             ret = -ERESTARTSYS; 
+215             goto wait_error; 
+216         } 
+217     	__set_current_state(TASK_RUNNING);  /*设置为运行状态 */ 
+218        remove_wait_queue(&dev->r_wait, &wait); /*将等待队列移除 */ 
+219     } 
+220     keyvalue = atomic_read(&dev->keyvalue); 
+221     releasekey = atomic_read(&dev->releasekey); 
+234     return 0; 
+235  
+236 wait_error: 
+237     set_current_state(TASK_RUNNING);          /* 设置任务为运行态  */ 
+238     remove_wait_queue(&dev->r_wait, &wait);   /* 将等待队列移除   */ 
+239     return ret; 
+240  
+241 data_error: 
+242     return -EINVAL; 
+243 } 
+
+/* 3.中断的时候会唤醒等待队列 */
+87  void timer_function(unsigned long arg) 
+88  { 
+    	......
+106     /* 唤醒进程 */ 
+107     if(atomic_read(&dev->releasekey)) { /* 完成一次按键过程 */ 
+108         /* wake_up(&dev->r_wait); */ 
+109         wake_up_interruptible(&dev->r_wait); 
+110     } 
+    	.....
+111 } 
+```
+
+#### 11.4 非阻塞IO 代码实现逻辑
+
+​	合阻塞IO的区别是，在read函数中如果没有案件按下就直接返回值了，但是在poll驱动函数中，会调用`poll_wait`函数加入等待队列。
+
+```c
+241 unsigned int imx6uirq_poll(struct file *filp,  
+struct poll_table_struct *wait) 
+242 { 
+243     unsigned int mask = 0; 
+244     struct imx6uirq_dev *dev = (struct imx6uirq_dev *) 
+		filp->private_data; 
+245  
+246     poll_wait(filp, &dev->r_wait, wait);    
+247      
+248     if(atomic_read(&dev->releasekey)) {   /* 按键按下    */ 
+249         mask = POLLIN | POLLRDNORM;          /* 返回 PLLIN   */ 
+250     } 
+251     return mask; 
+252 } 
+```
+
+
+
+### 12. 异步通知实验
+
+​		对于阻塞IO和非阻塞IO都是需要阻塞应用层程序（或者应用层不断轮询查询状态）来实现获取驱动信息的。最好的方式是如同硬件中断那样，驱动上报应用层状态，应用层操作IO。linux提供了异步通知功能来实现此逻辑。
+
+​		异步通知功能用**信号（signal）**这个信息来实现异步通知。其中，linux定义了31个信号来表示不同的需求（类似于软件中断量），能够响应**自定义**不同的信号处理函数。在linux 中按下`ctrl + C`和`kill -9`等软件功能，也是利用信号来实现的。
+
+```c
+34 #define SIGHUP      	  1     /* 终端挂起或控制进程终止        */ 
+35 #define SIGINT         2     /* 终端中断(Ctrl+C 组合键)        */ 
+36 #define SIGQUIT        3     /* 终端退出(Ctrl+\组合键)        */ 
+37 #define SIGILL         4     /* 非法指令                      */ 
+38 #define SIGTRAP        5     /* debug 使用，有断点指令产生    */ 
+39 #define SIGABRT        6     /* 由 abort(3)发出的退出指令     */ 
+40 #define SIGIOT         6     /* IOT 指令                        */ 
+41 #define SIGBUS         7     /* 总线错误                      */ 
+42 #define SIGFPE         8     /* 浮点运算错误                 */ 
+43 #define SIGKILL        9     /* 杀死、终止进程                */ 
+44 #define SIGUSR1        10    /* 用户自定义信号 1               */ 
+45 #define SIGSEGV        11    /* 段违例(无效的内存段)          */ 
+46 #define SIGUSR2        12    /* 用户自定义信号 2               */ 
+47 #define SIGPIPE        13    /* 向非读管道写入数据            */ 
+48 #define SIGALRM        14    /* 闹钟                         */ 
+49 #define SIGTERM        15     /* 软件终止                      */ 
+50 #define SIGSTKFLT      16    /* 栈异常                        */ 
+51 #define SIGCHLD        17    /* 子进程结束                    */ 
+52 #define SIGCONT        18    /* 进程继续                      */ 
+53 #define SIGSTOP        19    /* 停止进程的执行，只是暂停      */ 
+54 #define SIGTSTP        20    /* 停止进程的运行(Ctrl+Z 组合键)   */ 
+55 #define SIGTTIN        21    /* 后台进程需要从终端读取数据    */ 
+56 #define SIGTTOU        22    /* 后台进程需要向终端写数据    */ 
+57 #define SIGURG         23    /* 有"紧急"数据                */ 
+58 #define SIGXCPU        24    /* 超过 CPU 资源限制              */ 
+59 #define SIGXFSZ        25    /* 文件大小超额               */ 
+60 #define SIGVTALRM      26    /* 虚拟时钟信号               */ 
+61 #define SIGPROF        27     /* 时钟信号描述               */ 
+62 #define SIGWINCH       28    /* 窗口大小改变               */ 
+63 #define SIGIO          29    /* 可以进行输入/输出操作      */ 
+64 #define SIGPOLL        SIGIO    
+66 #define SIGPWR         30    /* 断点重启                    */ 
+67 #define SIGSYS         31    /* 非法的系统调用              */ 
+68 #define  SIGUNUSED     31    /* 未使用信号                  */ 
+```
+
+* **应用层中的信号处理：**
+
+  引用层中需要实现对应信号的处理函数，和指定处理函数，见`signal`函数。
+
+  ```c
+  sighandler_t signal(int signum, sighandler_t handler) 
+  /* 其中 handler 是一个函数指针 */
+  typedef void (*sighandler_t)(int) 
+      
+  ```
+
+  我们可以写一个应用程序demo, 里面只写一个**SIGINT(ctrl + c)**函数的处理逻辑，加打印来观察现象。
+
+  ```c
+  1  #include "stdlib.h" 
+  2  #include "stdio.h" 
+  3  #include "signal.h" 
+  4   
+  5  void sigint_handler(int num) 
+  6  { 
+  7      printf("\r\nSIGINT signal!\r\n"); 
+  8      exit(0);
+  9  } 
+  10  
+  11 int main(void) 
+  12 { 
+  13     signal(SIGINT, sigint_handler); 
+  14     while(1); 
+  15     return 0; 
+  16 }
+  
+  /* 实际测试 */
+  执行该程序，按下ctrl+C 会有打印，但是不会结束当前进程。
+  ```
+
+* **驱动层中的信号处理：**
+
+  1. 异步通知是通过`file_operations`中`fasync`实现的。
+
+  2. `fasync`函数依赖于`fasync_struct`可见下方代码。并且一般再`fasync`函数中也会调用` fasync_helper `函数来初始化之前定义的`fasync_struct`结构体。可见下方代码。
+
+     ```c
+     struct fasync_struct {
+     	spinlock_t		fa_lock;
+     	int				magic;
+     	int				fa_fd;
+     	struct fasync_struct	*fa_next; /* singly linked list */
+     	struct file		*fa_file;
+     	struct rcu_head		fa_rcu;
+     };
+     
+     /* fasync 函数 */
+     int (*fasync) (int fd, struct file *filp, int on) 
+         
+     /* fasync_helper 函数 */
+     int fasync_helper(int fd, struct file * filp, int on, struct fasync_struct **fapp)   
+     ```
+
+     ​		于是我们知道，调用链路为`file_operations->fasync->fasync_helper`，这样当应用层调用IO contrl 函数`fcntl(fd, F_SETFL, flags | FASYNC)`改变fasync标记时，对应函数就会执行。
+
+     ```c
+     				/* 驱动中 fasync 函数参考示例  */
+     1  struct xxx_dev {  
+     2     ...... 
+     3     struct fasync_struct *async_queue;  /* 异步相关结构体 */  
+     4  }; 
+     5  
+     6  static int xxx_fasync(int fd, struct file *filp, int on) 
+     7  { 
+     8     struct xxx_dev *dev = (xxx_dev)filp->private_data; 
+     9   
+     10    if (fasync_helper(fd, filp, on, &dev->async_queue) < 0) 
+     11        return -EIO; 
+     12    return 0; 
+     13 } 
+     14 
+     15 static struct file_operations xxx_ops = { 
+     16    ...... 
+     17    .fasync = xxx_fasync, 
+     18     ...... 
+     19 }; 
+     
+     /* realease 函数要是释放掉 */
+     1 static int xxx_release(struct inode *inode, struct file *filp) 
+     2 { 
+     3     return xxx_fasync(-1, filp, 0); /* 删除异步通知 */ 
+     4 } 
+     ```
+
+     以上，应用程序调用IO contrl来处理之后，只是让应用程序进入到了能够**被异步通知使能的状态**，此时并没有异步信号产生，当具体的信号产生时，驱动中需要调用**kill_fasync** 函数来发送指定的信号。
+
+     ```c
+     /*
+     *fp：要操作的 fasync_struct。
+     *sig：要发送的信号。
+     *band：可读时设置为 POLL_IN，可写时设置为 POLL_OUT。
+     */
+     void kill_fasync(struct fasync_struct **fp, int sig, int band) 
+         
+     ```
+
+* **关于应用程序使用的补充：**
+
+  上面第一段的应用程序使用介绍只是引入，要使用fasync 异步通知还需要下方流程：
+
+  1. 注册信号处理函数 ,即调用`singal`函数。
+
+  2. 将本应用程序的进程号告诉给内核 ` fcntl(fd, F_SETOWN, getpid())`
+
+  3. 开启异步通知
+
+     ```c
+     flags = fcntl(fd, F_GETFL);      /*  获取当前的进程状态      */ 
+     fcntl(fd, F_SETFL, flags | FASYNC);  /*  开启当前进程异步通知功能   */ 
+     ```
+
+  
+  
+  #### 12.1 实验case
+  
+    	该实验就是再按键实验中加入，如果有按键按下，就产生一个异步通知给应用层。即在中断函数加入`kill_fasync`函数，在设备结构体中加入` struct fasync_struct *async_queue;`指针。具体实现可见下方代码。
+  
+  ```c
+  49  /* imx6uirq 设备结构体 */ 
+  50  struct imx6uirq_dev{ 
+  ...... 
+  64      struct fasync_struct *async_queue;      /* 异步相关结构体 */ 
+  65  }; 
+  
+  67  struct imx6uirq_dev imx6uirq;   /* irq 设备 */ 
+  
+  90  void timer_function(unsigned long arg) 
+  91  { 
+  92      unsigned char value; 
+  93      unsigned char num; 
+  94      struct irq_keydesc *keydesc; 
+  95      struct imx6uirq_dev *dev = (struct imx6uirq_dev *)arg; 
+  ......              
+  109     if(atomic_read(&dev->releasekey)) {     /* 一次完整的按键过程 */ 
+  110         if(dev->async_queue)  
+  111             kill_fasync(&dev->async_queue, SIGIO, POLL_IN);  /* 这里调用 */
+  112     } 
+  121 } 
+  
+  269 static int imx6uirq_fasync(int fd, struct file *filp, int on) 
+  270 { 
+  271     struct imx6uirq_dev *dev = (struct imx6uirq_dev *) 
+  							filp->private_data; 
+  272     return fasync_helper(fd, filp, on, &dev->async_queue); 
+  273 } 
+  
+  281 static int imx6uirq_release(struct inode *inode, struct file *filp) 
+  282 { 
+  283     return imx6uirq_fasync(-1, filp, 0); 
+  284 } 
+  
+  286 /* 设备操作函数 */ 
+  287 static struct file_operations imx6uirq_fops = { 
+  288     .owner = THIS_MODULE, 
+  289     .open = imx6uirq_open, 
+  290     .read = imx6uirq_read, 
+  291     .poll = imx6uirq_poll, 
+  292     .fasync = imx6uirq_fasync, 
+  293     .release = imx6uirq_release, 
+  294 }; 
+  ```
+  
+  
+
+​     
+
+​     
+
+  ​    
+
+
+
+
+
+
+
+   
 
 
 
