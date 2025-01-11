@@ -2781,15 +2781,325 @@ void platform_device_unregister(struct platform_device *pdev)
 
 以上，可以发现，Linux Platfrom 就是一组提供匹配机制的接口，我们只要按照接口定义好规对于的函数，当同时注册了driver和device时，对于的驱动函数就能执行。而且`driver`和`device`还有不同的表现形式。
 
+---
 
+### 14. INPUT 子系统
 
-   
+### 15. IIC 驱动
 
+​	可以参考这一片手册https://blog.csdn.net/weixin_42031299/article/details/125610751
 
+​	IIC 设备的枚举例子：https://www.cnblogs.com/downey-blog/p/10493216.html
 
+​	linux中bus 总线的参考：https://www.cnblogs.com/downey-blog/p/10507703.html 
 
+​	初步来看，要想实现IIC驱动设备，我们需要关心三个层次：IIC 核心层、IIC适配器驱动、IIC设备驱动。其中IIC核心层是IIC_BUS 的实现，IIC适配器是IIC控制器驱动的实现，IIC设备是具体外围设备的实现。
 
+#### 15.1 linux bus 类 总线、驱动、设备需要的函数
 
+* **bus_type 的总线接口 ：**如下方所示，对于bus_type 类型的 总线结构体，只需要提供下面这些函数就可以了，不需要提供匹配表。其中`name`应该是个关键属性
+
+  ```c
+  struct bus_type i2c_bus_type = {
+  	.name		= "i2c",
+  	.match		= i2c_device_match,
+  	.probe		= i2c_device_probe,
+  	.remove		= i2c_device_remove,
+  	.shutdown	= i2c_device_shutdown,
+  };
+  ```
+
+  ​		首先，就会有一个问题，这个bus 怎么被注册的？match 函数和probe 函数什么时候被执行的？首先在Linux的启动阶段，会有一个**linux initcall**机制，就是将特定的代码段编译放到特定的地址，然后依次执行。在那之中就会调用`i2c_init`,由此`bus_register(&i2c_bus_type);`就会执行。在其中，就会注册一条`i2c`名字的总线。
+
+  ```c
+  static int __init i2c_init(void)
+  {
+  ......
+  	retval = bus_register(&i2c_bus_type);
+  ......
+  }
+  ```
+
+* **driver 需要的接口：**如下所示，可以看到`i2c_driver `类型也和paltfrom 总线的driver类似，但是有一些自己的特殊接口。从`match`函数角度来看的话是一样的，也是通过`id_table`和`device_driver->acpi_match_table` 这两个表来实现设备的匹配的。如果匹配了，该函数就会执行。
+
+  ```c
+  struct i2c_driver {
+  	unsigned int class;
+  	int (*attach_adapter)(struct i2c_adapter *) __deprecated;
+  
+  	int (*probe)(struct i2c_client *, const struct i2c_device_id *);
+  	int (*remove)(struct i2c_client *);
+  	void (*shutdown)(struct i2c_client *);
+  	void (*alert)(struct i2c_client *, unsigned int data);
+  	int (*command)(struct i2c_client *client, unsigned int cmd, void *arg);
+  
+  	struct device_driver driver;
+  	const struct i2c_device_id *id_table;
+  	int (*detect)(struct i2c_client *, struct i2c_board_info *);
+  	const unsigned short *address_list; 
+  	struct list_head clients;
+  };
+  
+  /* 5640 driver ./drivers/media/platform/mxc/capture/ov5640.c*/
+  static struct i2c_driver ov5640_i2c_driver = {
+  	.driver = {
+  		  .owner = THIS_MODULE,
+  		  .name  = "ov564x",
+  		  },
+  	.probe  = ov5640_probe,
+  	.remove = ov5640_remove,
+  	.id_table = ov5640_id,
+  };
+  ```
+
+* **device 需要的接口：**在linux 中，IICbus 用`i2c_client`结构体来描述IIC的设备信息。所以如果是手写设备信息的形式，就是要提供一个`i2c_client`的实现了，当然，也可以采用设备树的形式来实现一个设备。
+
+  这里要关心两个点：
+
+  1. i2c_client设备是怎么和driver匹配的？
+  2. 设备树的形式是怎么和driver匹配的？
+
+  ```c
+  struct i2c_client {
+  	unsigned short flags;		/* div., see below		*/
+  	unsigned short addr;		/* chip address - NOTE: 7bit	*/
+  					/* addresses are stored in the	*/
+  					/* _LOWER_ 7 bits		*/
+  	char name[I2C_NAME_SIZE];
+  	struct i2c_adapter *adapter;	/* the adapter we sit on	*/
+  	struct device dev;		/* the device structure		*/
+  	int irq;			/* irq issued by device		*/
+  	struct list_head detected;
+  #if IS_ENABLED(CONFIG_I2C_SLAVE)
+  	i2c_slave_cb_t slave_cb;	/* callback for slave mode	*/
+  #endif
+  };
+  
+/* 设备树的形式  ./arch/arm/boot/dts/imx6ul.dtsi*/
+      i2c1: i2c@021a0000 {
+        #address-cells = <1>;
+          #size-cells = <0>;
+        compatible = "fsl,imx6ul-i2c", "fsl,imx21-i2c";
+          reg = <0x021a0000 0x4000>;
+          interrupts = <GIC_SPI 36 IRQ_TYPE_LEVEL_HIGH>;
+          clocks = <&clks IMX6UL_CLK_I2C1>;
+          status = "disabled";
+      };
+  ```
+  
+  #### match 和probe 是如何执行的？
+  
+  ​		在我们利用linux bus 执行的时候，我们总知道 当device 和driver 由于match 设备中的一些匹配规则，匹配了之后，我们函数的probe就会执行，但是这条通讯链路是如何调用的，我们就利用IIC 总线浅浅分析一下：
+  
+  ​		假设我们是用设备树的方式，即IIC device已经被注册到Linux 系统中了，此时，我们将驱动加载到系统中，函数调用关系如下，这里我们还是用ov5640的IIC 接口来阅读，下面是0V5640的IIC init 接口
+  
+  ```c
+  static struct i2c_driver ov5640_i2c_driver = {
+  	.driver = {
+  		  .owner = THIS_MODULE,
+  		  .name  = "ov564x",
+  		  },
+  	.probe  = ov5640_probe,
+  	.remove = ov5640_remove,
+  	.id_table = ov5640_id,
+  };
+  
+  module_i2c_driver(ov5640_i2c_driver);
+  ```
+  
+  继续追踪`module_i2c_driver(ov5640_i2c_driver);`这个宏的实现,还是一个宏。
+  
+  ```c
+  module_i2c_driver(ov5640_i2c_driver);
+  /*  宏module_i2c_driver 的实现  */
+  #define module_i2c_driver(__i2c_driver) \
+  	module_driver(__i2c_driver, i2c_add_driver, \
+  			i2c_del_driver)
+  
+  module_driver(ov5640_i2c_driver,i2c_add_driver,i2c_del_driver)
+  ```
+  
+  我们再继续查看该宏的实现，由此，我们可以知道，最后的函数为：
+  
+  ```c
+  /*  宏module_driver的实现 */
+  #define module_driver(__driver, __register, __unregister, ...) \
+  static int __init __driver##_init(void) \
+  { \
+  	return __register(&(__driver) , ##__VA_ARGS__); \
+  } \
+  module_init(__driver##_init); \
+  static void __exit __driver##_exit(void) \
+  { \
+  	__unregister(&(__driver) , ##__VA_ARGS__); \
+  } \
+  module_exit(__driver##_exit);
+  
+  
+  static int __init ov5640_i2c_driver_init(void)
+  {
+  	return i2c_add_driver(&(ov5640_i2c_driver));
+  }
+  module_init(ov5640_i2c_driver_init);
+  
+  static void __exit ov5640_i2c_driver_exit(void) 
+  { \
+  	i2c_del_driver(&(ov5640_i2c_driver)); \
+  } \
+  module_exit(ov5640_i2c_driver_exit);
+  
+  ```
+  
+  由此，我们可以知道，最后调用的是**i2c_add_driver(&(ov5640_i2c_driver));**这样一个接口，我们看下这个接口会做什么内容呢？
+  
+  ```c
+  #define i2c_add_driver(driver)  	i2c_register_driver(THIS_MODULE, driver)
+  -> i2c_register_driver(THIS_MODULE，&(ov5640_i2c_driver));
+  
+  /* 注册总线 */
+  int i2c_register_driver(struct module *owner, struct i2c_driver *driver)
+  {
+  ......
+  	driver->driver.owner = owner;
+  	driver->driver.bus = &i2c_bus_type;
+  	res = driver_register(&driver->driver);
+  .....
+  
+  	return 0;
+  }
+  /* 查找总线驱动 ,然后把驱动添加到总线*/
+  int driver_register(struct device_driver *drv)
+  {
+  ......
+  	other = driver_find(drv->name, drv->bus);
+  	if (other) {
+  		printk(KERN_ERR "Error: Driver '%s' is already registered, "
+  			"aborting...\n", drv->name);
+  		return -EBUSY;
+  	}
+  
+  	ret = bus_add_driver(drv);
+  .......
+  }
+  
+  /* 会把驱动 添加到驱动链表中 ，并且执行attach 函数*/
+  int bus_add_driver(struct device_driver *drv)
+  {
+  .....
+  	struct bus_type *bus;
+  	struct driver_private *priv;
+  	int error = 0;
+  
+  	bus = bus_get(drv->bus);
+  
+  	klist_init(&priv->klist_devices, NULL, NULL);
+  	priv->driver = drv;
+  	drv->p = priv;
+  	priv->kobj.kset = bus->p->drivers_kset;
+     	/* 把 bus driver 加入到klist_drivers dirver 链表里面去。 */
+  	klist_add_tail(&priv->knode_bus, &bus->p->klist_drivers); 
+  	if (drv->bus->p->drivers_autoprobe) {
+  		error = driver_attach(drv);           /*  driver attatch */
+  		if (error)
+  			goto out_unregister;
+  	}
+  	module_add_driver(drv->owner, drv);
+  .....
+  }
+  ```
+  
+  ​		由上面分析可知，当一个新的driver init执行后，会执行到bus 的 `driver_attach`函数，我们再来分析分析这个函数。
+  
+  ```c
+  int driver_attach(struct device_driver *drv)
+  {
+  	return bus_for_each_dev(drv->bus, NULL, drv, __driver_attach);
+  }
+  
+  /* 由此可见，这个函数就是遍历找到device 然后data 一起作为传参给到  __driver_attach 函数*/
+  int bus_for_each_dev(struct bus_type *bus, struct device *start,
+  		     void *data, int (*fn)(struct device *, void *))
+  {
+  	struct klist_iter i;
+  	struct device *dev;
+  	int error = 0;
+  
+  	if (!bus || !bus->p)
+  		return -EINVAL;
+  
+  	klist_iter_init_node(&bus->p->klist_devices, &i,
+  			     (start ? &start->p->knode_bus : NULL));
+  	while ((dev = next_device(&i)) && !error)
+  		error = fn(dev, data);
+  	klist_iter_exit(&i);
+  	return error;
+  }
+  
+  /*可见这个函数是关键函数，里面会先执行match 函数，然后再执行 probe 函数，我们来分别看下 */
+  static int __driver_attach(struct device *dev, void *data)
+  {
+  	struct device_driver *drv = data;
+  
+  	if (!driver_match_device(drv, dev))
+  		return 0;
+  
+  	if (dev->parent)	/* Needed for USB */
+  		device_lock(dev->parent);
+  	device_lock(dev);
+  	if (!dev->driver)
+  		driver_probe_device(drv, dev);
+  	device_unlock(dev);
+  	if (dev->parent)
+  		device_unlock(dev->parent);
+  
+  	return 0;
+  }
+  
+  /* match -会执行总线的match 函数 */
+  static inline int driver_match_device(struct device_driver *drv,
+  				      struct device *dev)
+  {
+  	return drv->bus->match ? drv->bus->match(dev, drv) : 1;
+  }
+  
+  /* probe */
+  int driver_probe_device(struct device_driver *drv, struct device *dev)
+  {
+  ......
+  
+  	pm_runtime_barrier(dev);
+  	ret = really_probe(dev, drv);
+  	pm_request_idle(dev);
+  .....
+  }
+  static int really_probe(struct device *dev, struct device_driver *drv)
+  {
+  .......
+  	if (dev->bus->probe) {
+  		ret = dev->bus->probe(dev);
+  		if (ret)
+  			goto probe_failed;
+  	} else if (drv->probe) {
+  		ret = drv->probe(dev);
+  		if (ret)
+  			goto probe_failed;
+  	}
+  ......
+  }
+  ```
+  
+  由上我们可以知道，`__driver_attach`里面会做两个事情，一是调用bus 的match 行数去匹配driver和的device。另外一个是会调用bus的probe函数，如果没有的画就会直接执行driver的probe 函数。
+  
+  
+  
+  **关于IIC／bus驱动的局部总结** 
+  
+  1. 这里介绍的IICbus 驱动不是 对于SOC 上IP而言的，而是对于一个外设控制器而言的driver和device。
+  2. IIC bus 负责提供match 和 probe函数，提供匹配机制，但是不必提供具体匹配内容。
+  3. driver 和device 需要提供  id/match table表，并且提供具体的 driver 函数的实现。
+  4. match 和probe的执行函数时机是从宏定义`module_i2c_driver(ov5640_i2c_driver);`函数开始的，里面会展开为`ov5640_i2c_driver_init`函数。 在这个函数中会调用`klist_add_tail()`函数加入到bus 的`klist_drivers`链表里面去，然后调用`driver_attach()`函数去遍历匹配driver和device。匹配过程中先是执行`bus`的match函数，然后执行`bus`的`probe`函数。如果 bus 没有probe函数的话，就会执行driver的probe函数。
+
+#### 15.2 利用imax6ull + OV 5640 来看整个IIC驱动的流程。
 
 
 
