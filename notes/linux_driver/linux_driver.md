@@ -2875,16 +2875,17 @@ void platform_device_unregister(struct platform_device *pdev)
   #endif
   };
   
-/* 设备树的形式  ./arch/arm/boot/dts/imx6ul.dtsi*/
-      i2c1: i2c@021a0000 {
-        #address-cells = <1>;
-          #size-cells = <0>;
-        compatible = "fsl,imx6ul-i2c", "fsl,imx21-i2c";
-          reg = <0x021a0000 0x4000>;
-          interrupts = <GIC_SPI 36 IRQ_TYPE_LEVEL_HIGH>;
-          clocks = <&clks IMX6UL_CLK_I2C1>;
-          status = "disabled";
-      };
+
+    /* 设备树的形式  ./arch/arm/boot/dts/imx6ul.dtsi*/
+          i2c1: i2c@021a0000 {
+            #address-cells = <1>;
+              #size-cells = <0>;
+            compatible = "fsl,imx6ul-i2c", "fsl,imx21-i2c";
+              reg = <0x021a0000 0x4000>;
+              interrupts = <GIC_SPI 36 IRQ_TYPE_LEVEL_HIGH>;
+              clocks = <&clks IMX6UL_CLK_I2C1>;
+              status = "disabled";
+          };
   ```
   
   #### match 和probe 是如何执行的？
@@ -2903,13 +2904,14 @@ void platform_device_unregister(struct platform_device *pdev)
   	.remove = ov5640_remove,
   	.id_table = ov5640_id,
   };
-  
-  module_i2c_driver(ov5640_i2c_driver);
   ```
   
-  继续追踪`module_i2c_driver(ov5640_i2c_driver);`这个宏的实现,还是一个宏。
+  module_i2c_driver(ov5640_i2c_driver);
+```
   
-  ```c
+继续追踪`module_i2c_driver(ov5640_i2c_driver);`这个宏的实现,还是一个宏。
+  
+  ​```c
   module_i2c_driver(ov5640_i2c_driver);
   /*  宏module_i2c_driver 的实现  */
   #define module_i2c_driver(__i2c_driver) \
@@ -2917,9 +2919,9 @@ void platform_device_unregister(struct platform_device *pdev)
   			i2c_del_driver)
   
   module_driver(ov5640_i2c_driver,i2c_add_driver,i2c_del_driver)
-  ```
+```
   
-  我们再继续查看该宏的实现，由此，我们可以知道，最后的函数为：
+我们再继续查看该宏的实现，由此，我们可以知道，最后的函数为：
   
   ```c
   /*  宏module_driver的实现 */
@@ -2948,9 +2950,9 @@ void platform_device_unregister(struct platform_device *pdev)
   } \
   module_exit(ov5640_i2c_driver_exit);
   
-  ```
+```
   
-  由此，我们可以知道，最后调用的是**i2c_add_driver(&(ov5640_i2c_driver));**这样一个接口，我们看下这个接口会做什么内容呢？
+由此，我们可以知道，最后调用的是**i2c_add_driver(&(ov5640_i2c_driver));**这样一个接口，我们看下这个接口会做什么内容呢？
   
   ```c
   #define i2c_add_driver(driver)  	i2c_register_driver(THIS_MODULE, driver)
@@ -3006,9 +3008,9 @@ void platform_device_unregister(struct platform_device *pdev)
   	module_add_driver(drv->owner, drv);
   .....
   }
-  ```
+```
   
-  ​		由上面分析可知，当一个新的driver init执行后，会执行到bus 的 `driver_attach`函数，我们再来分析分析这个函数。
+​		由上面分析可知，当一个新的driver init执行后，会执行到bus 的 `driver_attach`函数，我们再来分析分析这个函数。
   
   ```c
   int driver_attach(struct device_driver *drv)
@@ -3086,13 +3088,13 @@ void platform_device_unregister(struct platform_device *pdev)
   	}
   ......
   }
-  ```
+```
   
-  由上我们可以知道，`__driver_attach`里面会做两个事情，一是调用bus 的match 行数去匹配driver和的device。另外一个是会调用bus的probe函数，如果没有的画就会直接执行driver的probe 函数。
+由上我们可以知道，`__driver_attach`里面会做两个事情，一是调用bus 的match 行数去匹配driver和的device。另外一个是会调用bus的probe函数，如果没有的画就会直接执行driver的probe 函数。
   
+
   
-  
-  **关于IIC／bus驱动的局部总结** 
+**关于IIC／bus驱动的局部总结** 
   
   1. 这里介绍的IICbus 驱动不是 对于SOC 上IP而言的，而是对于一个外设控制器而言的driver和device。
   2. IIC bus 负责提供match 和 probe函数，提供匹配机制，但是不必提供具体匹配内容。
@@ -3100,6 +3102,183 @@ void platform_device_unregister(struct platform_device *pdev)
   4. match 和probe的执行函数时机是从宏定义`module_i2c_driver(ov5640_i2c_driver);`函数开始的，里面会展开为`ov5640_i2c_driver_init`函数。 在这个函数中会调用`klist_add_tail()`函数加入到bus 的`klist_drivers`链表里面去，然后调用`driver_attach()`函数去遍历匹配driver和device。匹配过程中先是执行`bus`的match函数，然后执行`bus`的`probe`函数。如果 bus 没有probe函数的话，就会执行driver的probe函数。
 
 #### 15.2 利用imax6ull + OV 5640 来看整个IIC驱动的流程。
+
+ 		上面描述了IIC总线的bus、driver、device的匹配过程，但是在整个IIC通讯过程中，实际只介绍了IIC设备这一侧，对于IIC控制这一侧没有介绍，下面我们将从IIC控制器开始，探究整个过程。
+
+对于IIC的讨论，我们要抓住三个问题，
+
+1. 你想要用哪个 I2C控制器来使用I2c 总线？
+
+   linux 会为每一个IIC控制器建立一个IIC bus 
+
+2. 你想要和哪个IIC 设备通讯？
+
+3. 你要传输的数据是什么？
+
+4. IIC_client 这个设备结构，是怎么和IIC_adapter 绑定的？
+
+   参考这个信息：https://blog.csdn.net/qq_17270067/article/details/107233760
+
+   * 首先，要利用platfrom 设备完成I2C_adapter 总线的注册。内核会为每一个IIC_adapter创建一个设备节点。
+
+     ```c
+     int i2c_add_adapter(struct i2c_adapter *adapter);
+     ```
+
+   * 然后内核会解析设备树上挂载到这个总线上的设备节点，IIC_client这个设备结构体，
+
+     ```c
+     i2c_new_client_device()
+     ```
+
+   * 当driver 注册的时候，会根据`of_match_table`和`compatible`匹配的属性来调用驱动`probe`函数。
+
+     ```c
+     
+     ```
+
+
+
+
+所以 我们现在来回顾一下，可以分为下面两个过程：
+
+##### IIC总线控制器的初始化及设备节点的枚举。
+
+* 设备树信息
+
+  ```c
+  /* I2C adpter */
+  
+  i2c2: i2c@021a4000 {
+      #address-cells = <1>;
+      #size-cells = <0>;
+      compatible = "fsl,imx6ul-i2c", "fsl,imx21-i2c";
+      reg = <0x021a4000 0x4000>;
+      interrupts = <GIC_SPI 37 IRQ_TYPE_LEVEL_HIGH>;
+      clocks = <&clks IMX6UL_CLK_I2C2>;
+      status = "disabled";
+  };
+  
+  /* 5640 */
+  &i2c2 {
+    ......
+  	clock_frequency = <100000>;
+  	pinctrl-names = "default";
+  	pinctrl-0 = <&pinctrl_i2c2>;
+  	status = "okay";
+  
+  	ov5640: ov5640@3c {
+  		compatible = "ovti,ov5640";
+  		reg = <0x3c>;
+  		pinctrl-names = "default";
+  		pinctrl-0 = <&pinctrl_csi1
+  			     &csi_pwn_rst>;
+  		clocks = <&clks IMX6UL_CLK_CSI>;
+  		clock-names = "csi_mclk";
+  		pwn-gpios = <&gpio1 4 1>;
+  		rst-gpios = <&gpio1 2 0>;
+  		csi_id = <0>;
+  		mclk = <24000000>;
+  		mclk_source = <0>;
+  		status = "okay";
+  		port {
+  			ov5640_ep: endpoint {
+  				remote-endpoint = <&csi1_ep>;
+  			};
+  		};
+  	};
+  ......
+  }
+  ```
+
+* I2c adapter 控制器的识别过程，由设备树可以看出，其设备compatible是`imx21-i2c`，通过这个我们可以找到这个i2c 控制器的driver。
+
+  ```c
+  /* 将设备树转换成platform_device后i2c_imx_probe函数被调用 */
+  i2c_imx_probe
+      i2c_add_numbered_adapter /* 添加I2C控制器 */
+          __i2c_add_numbered_adapter
+              i2c_register_adapter /* 注册I2C控制器 */
+                  device_register /* I2C控制器设备注册 */
+                  of_i2c_register_devices /* 查找设备树控制器下面的从设备 */
+                      of_i2c_register_device /*解析设备树属性*/
+                          i2c_new_device
+                              client->dev.bus = &i2c_bus_type;
+                              device_register /* 添加设备I2C从设备 */
+                  i2c_scan_static_board_info /* 查找静态表，有些I2C设备是在代码中写死的，不是通过设备树的形式 */
+                      i2c_new_device
+                          client->dev.bus = &i2c_bus_type;
+                          device_register /* 添加设备I2C从设备 */
+  ```
+
+  在这个过程中，会遍历调用到`of_i2c_register_device`这个函数，会遍历设备树的IIC 从节点信息，然后注册设备。之后会调用`i2c_new_device` 来创建一个IIC 设备。
+
+  ```c
+  static void of_i2c_register_devices(struct i2c_adapter *adap)
+  {
+  	struct device_node *node;
+  
+  	/* Only register child devices if the adapter has a node pointer set */
+  	if (!adap->dev.of_node)
+  		return;
+  
+  	dev_dbg(&adap->dev, "of_i2c: walking child nodes\n");
+  
+  	for_each_available_child_of_node(adap->dev.of_node, node)
+  		of_i2c_register_device(adap, node);
+  }
+  
+  static struct i2c_client *of_i2c_register_device(struct i2c_adapter *adap,
+  						 struct device_node *node)
+  {
+  	struct i2c_client *result;
+  	struct i2c_board_info info = {};
+  	struct dev_archdata dev_ad = {};
+  	const __be32 *addr;
+  	int len;
+  
+  	dev_dbg(&adap->dev, "of_i2c: register %s\n", node->full_name);
+  
+  	if (of_modalias_node(node, info.type, sizeof(info.type)) < 0) {
+  		dev_err(&adap->dev, "of_i2c: modalias failure on %s\n",
+  			node->full_name);
+  		return ERR_PTR(-EINVAL);
+  	}
+  
+  	addr = of_get_property(node, "reg", &len);
+  	if (!addr || (len < sizeof(int))) {
+  		dev_err(&adap->dev, "of_i2c: invalid reg on %s\n",
+  			node->full_name);
+  		return ERR_PTR(-EINVAL);
+  	}
+  
+  	info.addr = be32_to_cpup(addr);
+  	if (info.addr > (1 << 10) - 1) {
+  		dev_err(&adap->dev, "of_i2c: invalid addr=%x on %s\n",
+  			info.addr, node->full_name);
+  		return ERR_PTR(-EINVAL);
+  	}
+  
+  	info.of_node = of_node_get(node);
+  	info.archdata = &dev_ad;
+  
+  	if (of_get_property(node, "wakeup-source", NULL))
+  		info.flags |= I2C_CLIENT_WAKE;
+  
+  	result = i2c_new_device(adap, &info);
+  	if (result == NULL) {
+  		dev_err(&adap->dev, "of_i2c: Failure registering %s\n",
+  			node->full_name);
+  		of_node_put(node);
+  		return ERR_PTR(-EINVAL);
+  	}
+  	return result;
+  }
+  ```
+
+  
+
+##### IIC外设驱动的匹配及初始化
 
 
 
