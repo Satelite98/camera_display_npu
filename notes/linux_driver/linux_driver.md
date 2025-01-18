@@ -3276,8 +3276,6 @@ void platform_device_unregister(struct platform_device *pdev)
   }
   ```
 
-  
-
 ##### IIC外设驱动的匹配及初始化
 
 
